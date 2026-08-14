@@ -1,0 +1,72 @@
+{
+  "name": "ai_ui_snapshot",
+  "display_name": "AI UI Snapshot",
+  "version": "1.5.0",
+  "description": "拟人化使用 DeepSeek 插件：用 bot 专属账号登录态驱动真实 DeepSeek 网页，通过封装好的高层工具（一键提问 ask_ai_and_snapshot、历史会话 deepseek_history、状态查询 deepseek_state）让 bot 像真人一样使用 DeepSeek，支持模式/开关/附带图片文件/长截图/分享链接，UI 完全真实",
+  "author": "MoFox Studio",
+  "license": "GPL-3.0",
+  "homepage": "",
+  "categories": [
+    "tool"
+  ],
+  "tags": [
+    "ui",
+    "screenshot",
+    "deepseek",
+    "persona",
+    "browser"
+  ],
+  "keywords": [
+    "截图",
+    "UI",
+    "DeepSeek",
+    "拟人",
+    "浏览器"
+  ],
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "python_dependencies": [
+    "playwright"
+  ],
+  "api_version": {
+    "log_api": "1.0.0",
+    "send_api": "1.0.0",
+    "media_api": "1.0.0",
+    "service_api": "1.0.0"
+  },
+  "dependencies_required": false,
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "ask_ai_and_snapshot",
+      "description": "向 DeepSeek 一键提问，按场景返回回复内容或生成官方长截图/分享链接；支持模式/深度思考/联网搜索/附带图片或文件/信息返回范围",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "deepseek_history",
+      "description": "列出 DeepSeek 历史会话，或进入指定会话并返回完整上下文与开关状态，供继续对话",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "deepseek_state",
+      "description": "查询当前 DeepSeek 对话模式与深度思考/联网搜索开关状态",
+      "dependencies": []
+    },
+    {
+      "component_type": "command",
+      "component_name": "ai_snapshot_command",
+      "description": "/ask <问题> 命令，显式驱动真实 DeepSeek 网页提问并截图",
+      "dependencies": []
+    }
+  ],
+  "config": {
+    "config_file": "config.py",
+    "config_class": "AiUiSnapshotConfig"
+  },
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0"
+}
