@@ -141,7 +141,7 @@ class AskAiAndSnapshotTool(BaseTool):
         try:
             from src.app.plugin_system.api.service_api import get_service
 
-            service = get_service("media_retriever:service:media_retriever_service")
+            service = get_service("media_retriever:service:media_retriever")
             if service is None:
                 logger.warning("未找到 media_retriever Service，无法解析已下载文件")
                 return None

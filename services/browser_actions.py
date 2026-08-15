@@ -31,6 +31,7 @@ from .deepseek_constants import (
     HISTORY_LIST_SCRIPT,
     HISTORY_OPEN_SCRIPT,
     HISTORY_SCROLL_SCRIPT,
+    MODE_OPTION_SELECTOR,
     MODE_TRIGGER_SELECTOR,
     POLL_INTERVAL_S,
     RESTORE_SCRIPT,
@@ -149,22 +150,13 @@ class BrowserActions(PageActions):
             if await trigger.count() > 0 and await trigger.is_visible():
                 await trigger.click(timeout=5000)
             await page.wait_for_timeout(600)
-            # 2. 用 JS 原生 click 点击可点选项容器（role=radio，Playwright
-            #    locator.click 会命中辅助文本层导致不触发 React 切换）
-            clicked = await page.evaluate(
-                """(text) => {
-                    const els = Array.from(document.querySelectorAll("div[class*='_9f2341b']"));
-                    const target = els.find(el => {
-                        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-                        return t === text && el.getAttribute('role') === 'radio';
-                    });
-                    if (!target) return false;
-                    target.click();
-                    return true;
-                }""",
-                normalized,
-            )
-            if not clicked:
+            # 2. 用 Playwright 真实点击选项容器（真实鼠标事件序列才能触发
+            #    React 状态切换；JS 原生 element.click() 只派发 click 事件，
+            #    DeepSeek 的 radio 组件不响应，实测无法切换）
+            option = page.locator(MODE_OPTION_SELECTOR).filter(has_text=normalized).first
+            if await option.count() > 0:
+                await option.click(timeout=5000)
+            else:
                 # 面板可能未展开，尝试文本点击
                 await self.click(normalized)
             await page.wait_for_timeout(1000)
@@ -222,9 +214,10 @@ class BrowserActions(PageActions):
     async def get_mode(self) -> str | None:
         """读取当前对话的模式。
 
-        依次探测：①模式触发器（``span[class*='321831d']``，新对话可见）；
-        ②面板展开时的 aria-checked 选项；③历史会话页顶部 ``the-header``
-        中的模式文本（历史会话无模式选择器，模式在顶部展示）。
+        依次探测：①面板展开时 aria-checked=true 的选项容器（真实选中态，
+        DeepSeek 的触发器 ``span[class*='321831d']`` 始终包含全部模式标题，
+        不能作为选中态依据）；②历史会话页顶部 ``the-header`` 中的模式文本
+        （历史会话无模式选择器，模式在顶部展示）；③触发器文本（旧版兜底）。
 
         Returns:
             str | None: 模式名（快速模式/专家模式/识图模式）；无法识别时返回 None。
@@ -233,14 +226,7 @@ class BrowserActions(PageActions):
             return await self._page.evaluate(
                 """() => {
                     const modes = ['快速模式', '专家模式', '识图模式'];
-                    // 1. 优先读触发器文本（新对话：span[class*='321831d']）
-                    for (const t of document.querySelectorAll("span[class*='321831d']")) {
-                        const txt = (t.innerText || '').replace(/\\s+/g, ' ').trim();
-                        for (const m of modes) {
-                            if (txt === m) return m;
-                        }
-                    }
-                    // 2. 面板展开时读 aria-checked 的选项容器
+                    // 1. 首选 aria-checked=true 的选项容器（真实选中态）
                     const el = document.querySelector("div[class*='_9f2341b'][aria-checked='true']");
                     if (el) {
                         const txt = (el.innerText || '').replace(/\\s+/g, ' ').trim();
@@ -249,12 +235,19 @@ class BrowserActions(PageActions):
                         }
                         return txt.split('\\n')[0] || null;
                     }
-                    // 3. 历史会话页顶部 the-header 中的模式文本（无模式选择器）
+                    // 2. 历史会话页顶部 the-header 中的模式文本（无模式选择器）
                     const headers = document.querySelectorAll('[class*="the-header"], header');
                     for (const h of headers) {
                         const txt = (h.innerText || '').replace(/\\s+/g, ' ').trim();
                         for (const m of modes) {
                             if (txt.includes(m)) return m;
+                        }
+                    }
+                    // 3. 触发器文本兜底（旧版逻辑；仅在面板收起且无选项容器时命中）
+                    for (const t of document.querySelectorAll("span[class*='321831d']")) {
+                        const txt = (t.innerText || '').replace(/\\s+/g, ' ').trim();
+                        for (const m of modes) {
+                            if (txt === m) return m;
                         }
                     }
                     return null;
