@@ -145,27 +145,27 @@ class AiUiSnapshotConfig(BaseConfig):
             order=4,
         )
 
-    @config_section("upload", title="图片上传", tag="ai")
+    @config_section("upload", title="附件上传", tag="ai")
     class UploadSection(SectionBase):
-        """向网页上传图片的配置。"""
+        """向网页上传附件（图片/文档）的配置。"""
 
         enabled: bool = Field(
             default=True,
-            description="是否允许通过 browser_upload 向网页上传聊天图片",
+            description="是否允许通过 browser_upload 向网页上传附件（图片/文档）",
             label="启用上传",
             tag="ai",
             order=0,
         )
         max_size_mb: float = Field(
             default=10.0,
-            description="上传图片最大大小（MB），超过拒绝上传",
+            description="上传附件最大大小（MB），超过拒绝上传",
             label="最大大小",
             tag="ai",
             order=1,
         )
         allowed_extensions: str = Field(
-            default="png,jpg,jpeg,webp,gif,bmp",
-            description="允许上传的图片扩展名（逗号分隔，小写）",
+            default="png,jpg,jpeg,webp,gif,bmp,md,txt,pdf,doc,docx,xls,xlsx,csv,ppt,pptx,json,py",
+            description="允许上传的附件扩展名（逗号分隔，小写；含图片与文档）",
             label="允许扩展名",
             tag="ai",
             order=2,

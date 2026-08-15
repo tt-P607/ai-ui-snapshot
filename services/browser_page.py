@@ -187,14 +187,15 @@ class PageActions:
         path: str,
         *,
         max_size_mb: float = 10.0,
-        allowed_extensions: str = "png,jpg,jpeg,webp,gif,bmp",
+        allowed_extensions: str = "png,jpg,jpeg,webp,gif,bmp,md,txt,pdf,doc,docx,xls,xlsx,csv,ppt,pptx,json,py",
         attach_timeout_s: float = 15.0,
     ) -> tuple[bool, str]:
         """上传本地文件到当前网页（通过隐藏的 file input）。
 
         上传前校验扩展名与大小，避免把网页不支持的内容塞给输入框。
         DeepSeek 上传为异步：``set_input_files`` 后轮询输入区内出现
-        img / 附件预览，确认附件挂载完成再返回。
+        附件预览（图片显示为 img、文档显示为文件名+大小），确认附件
+        挂载完成再返回。
 
         Args:
             path: 本地文件路径。
@@ -223,24 +224,26 @@ class PageActions:
         except Exception as exc:  # noqa: BLE001 - 未找到文件输入
             logger.warning(f"上传失败，未找到 file input: {path}")
             return False, f"上传失败（未找到网页文件输入）: {exc}"
-        # 轮询输入区内出现 img / 附件预览
+        # 轮询输入区内出现附件预览（图片 img 或文档文件名文本）
+        file_base = pathlib.Path(path).stem.lower()
         deadline = asyncio.get_running_loop().time() + attach_timeout_s
         attached = False
         while asyncio.get_running_loop().time() < deadline:
             attached = bool(
                 await page.evaluate(
-                    """() => {
+                    """(name) => {
                         const ta = document.querySelector('textarea');
                         if (!ta) return false;
                         let cur = ta.closest('form, div') || ta.parentElement;
-                        // 向上最多 4 层找输入区内的 img 或附件
-                        for (let i = 0; i < 4 && cur; i++) {
-                            const imgs = cur.querySelectorAll('img');
-                            if (imgs.length > 0) return true;
+                        // 向上最多 6 层：找输入区内的 img，或包含附件文件名的文本
+                        for (let i = 0; i < 6 && cur; i++) {
+                            if (cur.querySelectorAll('img').length > 0) return true;
+                            if (name && (cur.innerText || '').toLowerCase().includes(name)) return true;
                             cur = cur.parentElement;
                         }
                         return false;
-                    }"""
+                    }""",
+                    file_base,
                 )
             )
             if attached:
