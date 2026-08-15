@@ -2,8 +2,9 @@
 
 提供 `ai_ui_snapshot` 插件：让 Bot 像真人一样使用 DeepSeek。插件用任务级
 临时 Playwright 浏览器（复用 bot 账号登录态）驱动真实 DeepSeek 网页，
-通过封装好的高层工具（ask_ai_and_snapshot 提问、deepseek_history 历史会话、
-deepseek_state 状态查询）操作，无需逐步操控浏览器。
+通过封装好的高层工具（ask_ai_and_snapshot 提问、deepseek_snapshot 截图、
+deepseek_share 分享链接、deepseek_history 历史会话、deepseek_state 状态查询）
+操作，无需逐步操控浏览器。
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from .config import AiUiSnapshotConfig
 from .commands.ask_command import AiSnapshotCommand
 from .services import browser_session
 from .tools.browser_tool import BROWSER_TOOLS
-from .tools.snapshot_tool import AskAiAndSnapshotTool
+from .tools.snapshot_tool import SNAPSHOT_TOOLS
 
 logger = log_api.get_logger("ai_ui_snapshot")
 
@@ -24,9 +25,9 @@ logger = log_api.get_logger("ai_ui_snapshot")
 class AiUiSnapshotPlugin(BasePlugin):
     """AI UI 仿真截图插件。
 
-    提供封装好的高层工具（ask_ai_and_snapshot / deepseek_history /
-    deepseek_state）与快捷命令（/ask），通过任务级临时浏览器驱动真实
-    DeepSeek 网页，Bot 以参数方式使用所有能力。
+    提供封装好的高层工具（ask_ai_and_snapshot / deepseek_snapshot /
+    deepseek_share / deepseek_history / deepseek_state）与快捷命令（/ask），
+    通过任务级临时浏览器驱动真实 DeepSeek 网页，Bot 以参数方式使用所有能力。
     """
 
     plugin_name: str = "ai_ui_snapshot"
@@ -68,4 +69,4 @@ class AiUiSnapshotPlugin(BasePlugin):
         config = self.config
         if isinstance(config, AiUiSnapshotConfig) and not config.plugin.enabled:
             return []
-        return [*BROWSER_TOOLS, AskAiAndSnapshotTool, AiSnapshotCommand]
+        return [*BROWSER_TOOLS, *SNAPSHOT_TOOLS, AiSnapshotCommand]
