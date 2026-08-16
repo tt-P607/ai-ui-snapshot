@@ -1,10 +1,10 @@
 """AI UI 仿真截图插件入口。
 
-提供 `ai_ui_snapshot` 插件：让 Bot 像真人一样使用 DeepSeek。插件用任务级
-临时 Playwright 浏览器（复用 bot 账号登录态）驱动真实 DeepSeek 网页，
-通过封装好的高层工具（ask_ai_and_snapshot 提问、deepseek_snapshot 截图、
-deepseek_share 分享链接、deepseek_history 历史会话、deepseek_state 状态查询）
-操作，无需逐步操控浏览器。
+提供 `ai_ui_snapshot` 插件：让 Bot 像真人一样使用 DeepSeek 与 Gemini。
+插件用任务级临时 Playwright 浏览器（复用 bot 账号登录态）驱动真实网页，
+通过封装好的高层工具（DeepSeek：ask_ai_and_snapshot / deepseek_snapshot /
+deepseek_share / deepseek_history / deepseek_state；Gemini：ask_gemini_ai /
+gemini_generate_image / gemini_share）操作，无需逐步操控浏览器。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from .config import AiUiSnapshotConfig
 from .commands.ask_command import AiSnapshotCommand
 from .services import browser_session
 from .tools.browser_tool import BROWSER_TOOLS
+from .tools.gemini_tool import GEMINI_TOOLS
 from .tools.snapshot_tool import SNAPSHOT_TOOLS
 
 logger = log_api.get_logger("ai_ui_snapshot")
@@ -25,9 +26,8 @@ logger = log_api.get_logger("ai_ui_snapshot")
 class AiUiSnapshotPlugin(BasePlugin):
     """AI UI 仿真截图插件。
 
-    提供封装好的高层工具（ask_ai_and_snapshot / deepseek_snapshot /
-    deepseek_share / deepseek_history / deepseek_state）与快捷命令（/ask），
-    通过任务级临时浏览器驱动真实 DeepSeek 网页，Bot 以参数方式使用所有能力。
+    提供封装好的高层工具（DeepSeek 与 Gemini 两套能力）与快捷命令（/ask），
+    通过任务级临时浏览器驱动真实网页，Bot 以参数方式使用所有能力。
     """
 
     plugin_name: str = "ai_ui_snapshot"
@@ -42,11 +42,11 @@ class AiUiSnapshotPlugin(BasePlugin):
         if isinstance(config, AiUiSnapshotConfig) and config.plugin.enabled:
             browser_session.init_manager(
                 profile_root=config.web.web_profile_dir,
-                theme=config.web.default_theme,
-                url=config.web.url if config.web.url else "https://chat.deepseek.com/",
                 idle_timeout_s=config.web.idle_timeout,
                 headless=config.web.headless,
                 browser_path=config.screenshot.browser_path,
+                proxy_url=config.web.proxy_url,
+                page_theme=config.web.theme,
                 viewport_width=config.screenshot.width,
                 viewport_height=config.screenshot.height,
                 device_scale_factor=config.screenshot.device_scale_factor,
@@ -63,10 +63,20 @@ class AiUiSnapshotPlugin(BasePlugin):
     def get_components(self) -> list[type]:
         """返回当前插件包含的组件。
 
+        按 ``[sites]`` 各站点开关装配：DeepSeek 关闭时其工具与 /ask 命令不注册，
+        Gemini 关闭时其工具不注册（默认 deepseek 开、gemini 关）。
+
         Returns:
             组件类列表（细粒度工具 + 一键提问工具 + 命令）。
         """
         config = self.config
         if isinstance(config, AiUiSnapshotConfig) and not config.plugin.enabled:
             return []
-        return [*BROWSER_TOOLS, *SNAPSHOT_TOOLS, AiSnapshotCommand]
+        if not isinstance(config, AiUiSnapshotConfig):
+            return [*BROWSER_TOOLS, *SNAPSHOT_TOOLS, *GEMINI_TOOLS, AiSnapshotCommand]
+        components: list[type] = []
+        if config.sites.deepseek:
+            components.extend([*BROWSER_TOOLS, *SNAPSHOT_TOOLS, AiSnapshotCommand])
+        if config.sites.gemini:
+            components.extend(GEMINI_TOOLS)
+        return components

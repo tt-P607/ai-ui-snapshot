@@ -114,7 +114,6 @@ class AskAiAndSnapshotTool(BaseTool):
             output_format="auto",
             return_scope=return_scope,
             upload_max_size_mb=config.upload.max_size_mb,
-            upload_allowed_extensions=config.upload.allowed_extensions,
         )
         if not result.ok:
             return False, result.error or "向 DeepSeek 提问失败"

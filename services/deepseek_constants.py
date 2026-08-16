@@ -18,6 +18,28 @@ TOGGLE_NAMES: tuple[str, ...] = (THINK_TOGGLE_NAME, SEARCH_TOGGLE_NAME)
 # DeepSeek 对话消息虚拟滚动容器选择器（站点专有，变动时需同步更新）
 CONVERSATION_SELECTOR = ".ds-virtual-list"
 
+# 主题偏好 localStorage 键（DeepSeek 用 appKit 存储主题偏好，值为
+# {"value":"system"|"light"|"dark"}；改后需 reload 生效）
+THEME_PREF_KEY = "__appKit_@deepseek/chat_themePreference"
+
+# 读取主题偏好脚本（返回 system/light/dark，缺省视为 system）
+GET_THEME_SCRIPT = """() => {
+    try {
+        const raw = localStorage.getItem('__appKit_@deepseek/chat_themePreference');
+        if (!raw) return 'system';
+        const obj = JSON.parse(raw);
+        return obj && obj.value ? obj.value : 'system';
+    } catch (e) { return 'system'; }
+}"""
+# 设置主题偏好脚本（写入 localStorage，返回是否成功）
+SET_THEME_SCRIPT = """(theme) => {
+    try {
+        localStorage.setItem('__appKit_@deepseek/chat_themePreference',
+            JSON.stringify({value: theme, __version: '0'}));
+        return true;
+    } catch (e) { return false; }
+}"""
+
 # 模式选择器选项容器（带 aria-checked，真正可点的元素）
 MODE_OPTION_SELECTOR = "div[class*='_9f2341b']"
 
@@ -668,8 +690,7 @@ BROWSER_CHROME_SCRIPT = """(payload) => {
     try {
         const u = new URL(location.href);
         urlHost = u.host;
-        const segs = u.pathname.split('/').filter(Boolean).map(s => /^[0-9a-f]{8,}$/i.test(s) ? '•••' : s);
-        urlPath = segs.length ? '/' + segs.join('/') : '';
+        urlPath = u.pathname.length > 1 ? u.pathname : '';
     } catch (e) {
         urlPath = '';
     }

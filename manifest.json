@@ -1,8 +1,8 @@
 {
   "name": "ai_ui_snapshot",
   "display_name": "AI UI Snapshot",
-  "version": "1.6.0",
-  "description": "拟人化使用 DeepSeek 插件：用 bot 专属账号登录态驱动真实 DeepSeek 网页，通过封装好的高层工具（一键提问 ask_ai_and_snapshot、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state）让 bot 像真人一样使用 DeepSeek，支持模式/开关/附带图片文件/长截图/分享链接，UI 完全真实",
+  "version": "1.7.0",
+  "description": "拟人化使用 DeepSeek 与 Gemini 插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini 网页，通过封装好的高层工具（DeepSeek：一键提问 ask_ai_and_snapshot、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state；Gemini：提问 ask_gemini_ai、生图 gemini_generate_image、截图 gemini_snapshot、分享 gemini_share）让 bot 像真人一样使用两大 AI 网页，支持模式/开关/全模态附件/长截图/分享链接，UI 完全真实",
   "author": "MoFox Studio",
   "license": "GPL-3.0",
   "homepage": "",
@@ -13,6 +13,7 @@
     "ui",
     "screenshot",
     "deepseek",
+    "gemini",
     "persona",
     "browser"
   ],
@@ -20,6 +21,7 @@
     "截图",
     "UI",
     "DeepSeek",
+    "Gemini",
     "拟人",
     "浏览器"
   ],
@@ -69,9 +71,33 @@
       "dependencies": []
     },
     {
+      "component_type": "tool",
+      "component_name": "ask_gemini_ai",
+      "description": "向 Gemini 真实提问（全模态：图片/语音/视频/文档），返回回复文本；支持模型/扩展思考/对话定位/附带媒体",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "gemini_generate_image",
+      "description": "用 Gemini 原生能力生成图片（可带 1 张/多张参考图改图/参考生成），自动发送到当前聊天",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "gemini_snapshot",
+      "description": "直接截取当前/指定 Gemini 对话界面为长截图并发送，不提问、不改设置",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "gemini_share",
+      "description": "直接获取当前/指定 Gemini 对话的官方公开分享链接，不提问",
+      "dependencies": []
+    },
+    {
       "component_type": "command",
       "component_name": "ai_snapshot_command",
-      "description": "/ask <问题> 命令，显式驱动真实 DeepSeek 网页提问并截图",
+      "description": "/ask <问题> 命令，显式驱动真实 DeepSeek/Gemini 网页提问并截图",
       "dependencies": []
     }
   ],

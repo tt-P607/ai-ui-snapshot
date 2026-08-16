@@ -11,6 +11,7 @@ import asyncio
 import base64
 import io
 import pathlib
+import time
 from typing import Any
 
 from PIL import Image
@@ -28,6 +29,7 @@ from .deepseek_constants import (
     EXPAND_SCRIPT,
     FINGERPRINT_SCRIPT,
     GENERATING_SCRIPT,
+    GET_THEME_SCRIPT,
     HISTORY_LIST_SCRIPT,
     HISTORY_OPEN_SCRIPT,
     HISTORY_SCROLL_SCRIPT,
@@ -36,6 +38,7 @@ from .deepseek_constants import (
     POLL_INTERVAL_S,
     RESTORE_SCRIPT,
     SEARCH_TOGGLE_NAME,
+    SET_THEME_SCRIPT,
     SIDEBAR_SCRIPT,
     SUPPORTED_MODES,
     THINK_SCRIPT,
@@ -101,6 +104,62 @@ class BrowserActions(PageActions):
         self._decoration_enabled = decoration_enabled
         self._decoration_theme = normalize_decoration_theme(decoration_theme)
         self._decoration_avatar_url = self._resolve_avatar_url((decoration_avatar_url or "").strip())
+
+    @staticmethod
+    def _normalize_theme(theme: str) -> str:
+        """归一化主题为 auto/light/dark。
+
+        Args:
+            theme: 原始输入（auto/light/dark，大小写不敏感）。
+
+        Returns:
+            str: auto/light/dark 之一；无法识别时回退 auto。
+        """
+        value = (theme or "").strip().lower()
+        return value if value in ("auto", "light", "dark") else "auto"
+
+    @staticmethod
+    def _resolve_auto_theme() -> str:
+        """按本地时间解析 auto 主题：18:00-06:00 为深色，其余浅色。
+
+        Returns:
+            str: light / dark。
+        """
+        hour = time.localtime().tm_hour
+        return "dark" if hour >= 18 or hour < 6 else "light"
+
+    async def set_theme(self, theme: str | None = None) -> str:
+        """设置 DeepSeek 页面主题（写 localStorage 主题偏好）。
+
+        DeepSeek 主题由 localStorage ``chat_themePreference`` 控制，改后需
+        reload 使 React 重新读取生效。auto 按本地时间自动切换白天/夜间。
+
+        Args:
+            theme: 目标主题（auto/light/dark）；None 用构造器配置。
+
+        Returns:
+            str: 实际应用的主题（light/dark/system）。
+        """
+        target = self._normalize_theme(theme) if theme is not None else self._decoration_theme
+        resolved = self._resolve_auto_theme() if target == "auto" else target
+        try:
+            await self._page.evaluate(SET_THEME_SCRIPT, resolved)
+            await self._page.reload(wait_until="domcontentloaded")
+            await self._page.wait_for_timeout(4000)
+        except Exception:  # noqa: BLE001 - 页面未就绪
+            pass
+        return resolved
+
+    async def get_theme(self) -> str:
+        """读取当前 DeepSeek 主题偏好（system/light/dark）。
+
+        Returns:
+            str: system/light/dark。
+        """
+        try:
+            return str(await self._page.evaluate(GET_THEME_SCRIPT) or "system")
+        except Exception:  # noqa: BLE001 - 页面未就绪
+            return "system"
 
     @staticmethod
     def _resolve_avatar_url(avatar_url: str) -> str:
@@ -295,6 +354,23 @@ class BrowserActions(PageActions):
             return str(await self._page.evaluate(ACTIVE_CONVERSATION_TITLE_SCRIPT) or "").strip()
         except Exception:  # noqa: BLE001 - 页面未就绪
             return ""
+
+    async def wait_conversation_title(self, timeout_s: int = 8) -> str:
+        """等待新对话标题由 AI 生成后返回（首条提问时标题异步生成）。
+
+        Args:
+            timeout_s: 等待超时秒数。
+
+        Returns:
+            str: 生成的对话标题；超时仍未生成时返回空字符串。
+        """
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while asyncio.get_running_loop().time() < deadline:
+            title = await self.get_active_conversation_title()
+            if title:
+                return title
+            await asyncio.sleep(1)
+        return ""
 
     async def get_active_conversation_id(self) -> str:
         """读取当前活跃对话的稳定 ID（URL 中的会话 UUID）。

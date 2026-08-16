@@ -8,6 +8,7 @@ LLM 处理一个任务时临时打开一个 Playwright 浏览器（复用 bot �
 from __future__ import annotations
 
 import asyncio
+import os
 import pathlib
 import time
 from dataclasses import dataclass, field
@@ -17,6 +18,43 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.kernel.concurrency import get_task_manager
 
 logger = get_logger("ai_ui_snapshot.browser_session")
+
+# 抹除自动化指纹的初始化脚本（Google 反自动化检测只信任正式版 Chrome + 无 webdriver 指纹）。
+# 与登录脚本 scripts/_login_gemini_interactive.py 的 STEALTH_INIT_SCRIPT 保持一致。
+STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+window.chrome = {runtime: {}};
+const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (origQuery) {
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+            ? Promise.resolve({state: Notification.permission})
+            : origQuery(parameters)
+    );
+}
+"""
+
+# Windows 常见 Chrome 安装路径（运行时优先用真实 Chrome，避免 Playwright 自带被风控判定）
+_DEFAULT_CHROME_CANDIDATES: tuple[str, ...] = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"$LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+)
+
+
+def _default_browser_path() -> str:
+    """探测系统中已安装的正式版 Chrome 路径（找不到返回空）。
+
+    Returns:
+        str: Chrome 可执行文件路径；未找到时返回空字符串。
+    """
+    for cand in _DEFAULT_CHROME_CANDIDATES:
+        expanded = pathlib.Path(os.path.expandvars(cand))
+        if expanded.is_file():
+            return str(expanded)
+    return ""
 
 
 @dataclass
@@ -130,10 +168,11 @@ class BrowserSessionManager:
         *,
         profile_root: str,
         theme: str = "deepseek",
-        url: str = "https://chat.deepseek.com/",
         idle_timeout_s: int = 600,
         headless: bool = True,
         browser_path: str = "",
+        proxy_url: str = "",
+        page_theme: str = "auto",
         viewport_width: int = 1440,
         viewport_height: int = 900,
         device_scale_factor: int = 2,
@@ -146,7 +185,7 @@ class BrowserSessionManager:
 
         Args:
             profile_root: 持久化浏览器会话根目录（含登录态）。
-            theme: 站点主题（当前仅 deepseek），用于定位登录态目录。
+            theme: 站点主题（deepseek / gemini），用于定位登录态目录。
             url: 打开的目标网址。
             idle_timeout_s: 空闲自动关闭秒数。
             headless: 是否无头。
@@ -161,10 +200,11 @@ class BrowserSessionManager:
         """
         self._profile_root = pathlib.Path(profile_root)
         self._theme = theme
-        self._url = url
         self._idle_timeout_s = idle_timeout_s
         self._headless = headless
         self._browser_path = browser_path
+        self._proxy_url = proxy_url
+        self._page_theme = page_theme
         self._viewport_width = viewport_width
         self._viewport_height = viewport_height
         self._device_scale_factor = device_scale_factor
@@ -201,6 +241,11 @@ class BrowserSessionManager:
         return self._decoration_enabled
 
     @property
+    def page_theme(self) -> str:
+        """页面明暗主题（auto/light/dark）。"""
+        return self._page_theme
+
+    @property
     def decoration_theme(self) -> str:
         """浏览器外壳配色（auto/light/dark）。"""
         return self._decoration_theme
@@ -210,11 +255,42 @@ class BrowserSessionManager:
         """自定义 Google 账号头像 URL。"""
         return self._decoration_avatar_url
 
-    async def get(self, stream_id: str) -> BrowserSession:
-        """获取（或创建）指定会话的浏览器会话。
+    @staticmethod
+    def _site_url(theme: str) -> str:
+        """按站点主题返回默认网址（站点地址由代码映射，不暴露配置）。
+
+        Args:
+            theme: 站点主题（deepseek / gemini）。
+
+        Returns:
+            str: 目标网址。
+        """
+        return {
+            "deepseek": "https://chat.deepseek.com/",
+            "gemini": "https://gemini.google.com/app",
+        }.get(theme, "https://chat.deepseek.com/")
+
+    def _key(self, stream_id: str, theme: str = "") -> str:
+        """构造会话存储键（theme:stream_id）。
 
         Args:
             stream_id: 聊天流 ID。
+            theme: 站点主题；空用管理器默认主题。
+
+        Returns:
+            str: 会话存储键。
+        """
+        return f"{theme or self._theme}:{stream_id}"
+
+    async def get(self, stream_id: str, theme: str = "") -> BrowserSession:
+        """获取（或创建）指定会话的浏览器会话。
+
+        按站点主题路由：不同主题（deepseek/gemini）使用各自的登录态 profile
+        与默认 URL，会话以 (theme, stream_id) 隔离，避免两个站点串会话。
+
+        Args:
+            stream_id: 聊天流 ID。
+            theme: 站点主题（deepseek/gemini）；空用管理器默认主题。
 
         Returns:
             BrowserSession: 该任务的浏览器会话。
@@ -222,7 +298,9 @@ class BrowserSessionManager:
         Raises:
             RuntimeError: Playwright 不可用。
         """
-        session = self._sessions.get(stream_id)
+        theme = theme or self._theme
+        session_key = self._key(stream_id, theme)
+        session = self._sessions.get(session_key)
         if session is not None:
             session.touch()
             return session
@@ -232,50 +310,68 @@ class BrowserSessionManager:
         except ImportError as exc:  # pragma: no cover - 依赖缺失时
             raise RuntimeError("Playwright 未安装，插件启动时会自动安装") from exc
 
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self._profile_root / theme
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        url = self._site_url(theme)
         p = await async_playwright().start()
         launch_kwargs: dict[str, Any] = {
-            "user_data_dir": str(self.profile_dir),
+            "user_data_dir": str(profile_dir),
             "headless": self._headless,
             "viewport": self.viewport,
             "device_scale_factor": self._device_scale_factor,
             "permissions": ["clipboard-read", "clipboard-write"],
         }
-        if self._browser_path:
-            launch_kwargs["executable_path"] = self._browser_path
+        # 优先使用配置的浏览器路径；未配置时自动探测正式版 Chrome
+        # （Playwright 自带 Chromium 的自动化指纹会被 Google 风控判定并登出）
+        browser_path = self._browser_path or _default_browser_path()
+        if browser_path:
+            launch_kwargs["executable_path"] = browser_path
+            # 抹除自动化指纹（webdriver 等），与登录环境一致，避免登录态被风控失效
+            launch_kwargs.setdefault("args", []).extend(
+                ["--disable-blink-features=AutomationControlled", "--disable-infobars"]
+            )
+            launch_kwargs.setdefault("ignore_default_args", []).append("--enable-automation")
+        if self._proxy_url:
+            launch_kwargs["proxy"] = {"server": self._proxy_url}
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(self._url, wait_until="domcontentloaded", timeout=60000)
+        if browser_path:
+            await page.add_init_script(STEALTH_INIT_SCRIPT)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(3000)
 
         session = BrowserSession(stream_id=stream_id, context=context, playwright=p, page=page)
-        self._sessions[stream_id] = session
+        self._sessions[session_key] = session
         self._ensure_cleanup_task()
-        logger.info(f"浏览器会话已创建（stream={stream_id}）")
+        logger.info(f"浏览器会话已创建（theme={theme}, stream={stream_id}）")
         return session
 
-    def touch(self, stream_id: str) -> None:
+    def touch(self, stream_id: str, theme: str = "") -> None:
         """刷新会话活动时间。
 
         Args:
             stream_id: 聊天流 ID。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         if session is not None:
             session.touch()
 
-    def lock_mode(self, stream_id: str, mode: str) -> None:
+    def lock_mode(self, stream_id: str, mode: str, theme: str = "") -> None:
         """锁定指定会话当前活跃对话的模式（历史会话进入等场景）。
 
         Args:
             stream_id: 聊天流 ID。
             mode: 要锁定的模式名。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         if session is not None:
             session.lock_mode(mode)
 
-    def lock_conversation_mode(self, stream_id: str, conversation_id: str, mode: str, title: str = "") -> None:
+    def lock_conversation_mode(
+        self, stream_id: str, conversation_id: str, mode: str, title: str = "", theme: str = ""
+    ) -> None:
         """锁定指定会话 ID 的模式，并切换当前活跃会话。
 
         Args:
@@ -283,52 +379,67 @@ class BrowserSessionManager:
             conversation_id: 会话稳定 ID（URL 中的 UUID）。
             mode: 要锁定的模式名。
             title: 会话标题（仅展示用，不作为锁 key）。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         if session is not None:
             session.lock_conversation_mode(conversation_id, mode, title)
 
-    def set_active_conversation(self, stream_id: str, conversation_id: str, title: str = "") -> None:
+    def set_active_conversation(
+        self, stream_id: str, conversation_id: str, title: str = "", theme: str = ""
+    ) -> None:
         """记录指定会话当前活跃会话的 ID 与标题（ID 生成后迁移模式锁）。
 
         Args:
             stream_id: 聊天流 ID。
             conversation_id: 会话稳定 ID（URL 中的 UUID）。
             title: 会话标题（仅展示用，不作为锁 key）。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         if session is not None:
             session.set_active_conversation(conversation_id, title)
 
-    def clear_mode(self, stream_id: str) -> None:
+    def clear_mode(self, stream_id: str, theme: str = "") -> None:
         """清除指定会话的全部对话模式锁。
 
         Args:
             stream_id: 聊天流 ID。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         if session is not None:
             session.clear_mode()
 
-    def get_locked_mode(self, stream_id: str) -> str | None:
+    def get_locked_mode(self, stream_id: str, theme: str = "") -> str | None:
         """读取指定会话当前活跃对话已锁定的模式。
 
         Args:
             stream_id: 聊天流 ID。
+            theme: 站点主题；空用管理器默认主题。
 
         Returns:
             str | None: 已锁定模式；未锁定或会话不存在时返回 None。
         """
-        session = self._sessions.get(stream_id)
+        session = self._sessions.get(self._key(stream_id, theme))
         return session.get_locked_mode() if session is not None else None
 
-    async def close(self, stream_id: str) -> None:
+    async def close(self, stream_id: str, theme: str = "") -> None:
         """关闭指定会话。
 
         Args:
             stream_id: 聊天流 ID。
+            theme: 站点主题；空用管理器默认主题。
         """
-        session = self._sessions.pop(stream_id, None)
+        await self._close_by_key(self._key(stream_id, theme))
+
+    async def _close_by_key(self, key: str) -> None:
+        """按存储键关闭会话（关闭异常静默忽略）。
+
+        Args:
+            key: 会话存储键（theme:stream_id）。
+        """
+        session = self._sessions.pop(key, None)
         if session is None:
             return
         try:
@@ -340,12 +451,12 @@ class BrowserSessionManager:
                 await session.playwright.stop()
         except Exception:  # noqa: BLE001 - 停止异常忽略
             pass
-        logger.info(f"浏览器会话已关闭（stream={stream_id}）")
+        logger.info(f"浏览器会话已关闭（{key}）")
 
     async def close_all(self) -> None:
         """关闭所有会话（插件卸载时调用）。"""
-        for stream_id in list(self._sessions):
-            await self.close(stream_id)
+        for key in list(self._sessions):
+            await self._close_by_key(key)
         if self._cleanup_task:
             self._cleanup_task.cancel()
             self._cleanup_task = None
@@ -367,13 +478,13 @@ class BrowserSessionManager:
                 await asyncio.sleep(10)
                 now = time.time()
                 stale = [
-                    sid
-                    for sid, s in self._sessions.items()
+                    key
+                    for key, s in self._sessions.items()
                     if s.busy <= 0 and now - s.last_active > self._idle_timeout_s
                 ]
-                for sid in stale:
-                    logger.info(f"会话空闲超时自动关闭（stream={sid}）")
-                    await self.close(sid)
+                for key in stale:
+                    logger.info(f"会话空闲超时自动关闭（{key}）")
+                    await self._close_by_key(key)
         except asyncio.CancelledError:
             return
 
@@ -400,11 +511,11 @@ def get_manager() -> BrowserSessionManager:
 def init_manager(
     *,
     profile_root: str,
-    theme: str = "deepseek",
-    url: str = "https://chat.deepseek.com/",
     idle_timeout_s: int = 600,
     headless: bool = True,
     browser_path: str = "",
+    proxy_url: str = "",
+    page_theme: str = "auto",
     viewport_width: int = 1440,
     viewport_height: int = 900,
     device_scale_factor: int = 2,
@@ -417,8 +528,6 @@ def init_manager(
 
     Args:
         profile_root: 登录态根目录。
-        theme: 站点主题。
-        url: 目标网址。
         idle_timeout_s: 空闲自动关闭秒数。
         headless: 是否无头。
         browser_path: Chromium 可执行路径（可空）。
@@ -436,11 +545,11 @@ def init_manager(
     global _manager
     _manager = BrowserSessionManager(
         profile_root=profile_root,
-        theme=theme,
-        url=url,
         idle_timeout_s=idle_timeout_s,
         headless=headless,
         browser_path=browser_path,
+        proxy_url=proxy_url,
+        page_theme=page_theme,
         viewport_width=viewport_width,
         viewport_height=viewport_height,
         device_scale_factor=device_scale_factor,
