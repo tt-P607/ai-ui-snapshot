@@ -59,15 +59,6 @@ MODEL_MARKDOWN_SELECTOR = ".markdown.markdown-main-panel"
 # 对话内容容器选择器（撑开长截图时定位）
 CONVERSATION_SELECTOR = "main.chat-app, main[class*='chat-app'], main"
 
-# 右侧主对话区滚动容器（Gemini 为固定视口布局，消息区在此容器内滚动；
-# 整页 docH 被 html overflow:hidden 锁死，故截图改为对该容器分片截取）
-CONVERSATION_SCROLL_SELECTOR = ".content-wrapper"
-
-# 对话内容真实容器（消息列表在此容器内完整渲染，内容高度 = 完整对话高度；
-# 外层 infinite-scroller 是虚拟滚动，scrollHeight 不承载真实内容，故长截图
-# 改为将该容器临时设为可滚动后逐段元素截图拼接）
-CONVERSATION_CONTENT_SELECTOR = ".conversation-container"
-
 # 文件上传：Gemini 输入区旁"上传和工具"按钮（打开文件选择器后存在隐藏 input[type=file]）
 UPLOAD_BUTTON_SELECTOR = "button[aria-label='上传和工具'], button[aria-label*='上传']"
 FILE_INPUT_SELECTOR = "input[type='file']"
@@ -308,52 +299,45 @@ THINKING_SELECTED_SCRIPT = """() => {
 # 扩展思考开关名（叠加在模型上，独立于模型切换）
 THINKING_ITEM = "扩展思考"
 
-# Gemini 完整整页长截图撑开脚本：把中间滚动链高度赋为完整内容高度，并放开
-# html/body 的 overflow（html overflow:hidden 会锁死 docH），使整页高度跟随
-# 对话内容增长，从而 full_page 截出含侧边栏的单张真长截图（无重复拼接）。
-# 返回 { saved, contentH }，saved 供 RESTORE_SCRIPT 还原。
+# Gemini 完整整页长截图撑开脚本：把对话内容所在滚动链高度赋为完整内容高度，
+# 并放开 html/body 的 overflow（html overflow:hidden 会锁死 docH），使整页
+# 高度跟随对话内容增长，从而 full_page 截出含侧边栏的单张真长截图。
+#
+# 旧版曾用 document.querySelector('infinite-scroller') 取滚动容器，会命中
+# 侧边栏第一个 infinite-scroller（.lr26-theme）而非对话区的
+# infinite-scroller.chat-history，导致对话链未被撑开、截图底部空白。
+# 现改为：定位 .conversation-container（消息真实渲染容器）后沿祖先链向上
+# 撑开对话区列（至 bard-sidenav-content 为止）；侧边栏列 bard-sidenav 保持
+# 视口高度（align-self: flex-start 不被拉伸）并铺其原本背景色，使左下角
+# 账号/设置区块始终可见、侧边栏竖条视觉完整。祖先节点
+# （bard-sidenav-container 之上）仅放开 overflow。
+# 返回 { saved, contentH }，saved 为 RESTORE_SCRIPT 兼容的 {path,...} 列表。
 GEMINI_FULLPAGE_EXPAND_SCRIPT = """() => {
     const cc = document.querySelector('.conversation-container');
     if (!cc) return null;
-    const contentH = cc.scrollHeight || cc.getBoundingClientRect().height || 0;
-    if (contentH <= 0) return null;
-    const saved = [];
-    const sels = [
-        '.content-wrapper', '.chat-history-scroll-container', 'infinite-scroller',
-        '.xap-uploader-dropzone.chat-container', 'chat-window', 'main'
-    ];
-    for (const sel of sels) {
-        const el = document.querySelector(sel);
-        if (!el) continue;
-        saved.push({ sel, h: el.style.height, minH: el.style.minHeight, oy: el.style.overflowY, o: el.style.overflow });
-        el.style.setProperty('height', contentH + 'px', 'important');
-        el.style.setProperty('min-height', contentH + 'px', 'important');
-        el.style.setProperty('overflow-y', 'visible', 'important');
-        el.style.setProperty('overflow', 'visible', 'important');
+    // 完整内容高度：取所有对话气泡与模型回复的最大物理底部
+    let contentBottom = 0;
+    const msgs = Array.from(cc.querySelectorAll(
+        '.user-query-container, .response-container, .response-content, model-response'
+    ));
+    for (const el of msgs) {
+        const r = el.getBoundingClientRect();
+        const abs = r.bottom + window.scrollY;
+        if (abs > contentBottom) contentBottom = abs;
     }
-    saved.push({ sel: '.conversation-container', h: cc.style.height, oy: cc.style.overflowY, o: cc.style.overflow });
-    cc.style.setProperty('height', 'auto', 'important');
-    cc.style.setProperty('overflow-y', 'visible', 'important');
-    cc.style.setProperty('overflow', 'visible', 'important');
-    for (const sel of ['html', 'body']) {
-        const el = document.querySelector(sel);
-        if (!el) continue;
-        saved.push({ sel, h: el.style.height, oy: el.style.overflowY, o: el.style.overflow });
-        el.style.setProperty('height', 'auto', 'important');
-        el.style.setProperty('overflow-y', 'visible', 'important');
-        el.style.setProperty('overflow', 'visible', 'important');
-    }
-    return { saved, contentH };
-}"""
+    if (contentBottom <= 0) contentBottom = cc.scrollHeight || cc.getBoundingClientRect().height || 0;
+    if (contentBottom <= 0) return null;
 
-# 完整整页长截图拉伸脚本：撑开消息容器及其全祖先链，使 Gemini 对话区可无损
-# 滚动并完整渲染（参考 DeepSeek EXPAND_SCRIPT 思路，适配 Gemini 结构）。
-# 只记录 CSS 路径与样式值（DOM 节点无法经 evaluate 返回）。
-EXPAND_SCRIPT = """(selector) => {
-    const el = document.querySelector(selector) || document.querySelector('main') || document.body;
-    if (!el) return null;
-    const saved = [];
-    const recorded = new Set();
+    // 获取输入区和免责声明的真实高度
+    const inputCont = document.querySelector('input-container, .input-area-container, input-area-v2');
+    const inputH = inputCont ? Math.round(inputCont.getBoundingClientRect().height) : 117;
+
+    // 计算整页与各容器的精确高度：
+    const viewportH = window.innerHeight || 900;
+    const isLong = (contentBottom + inputH) > viewportH;
+    const chatHistoryH = isLong ? Math.round(contentBottom) : (viewportH - inputH);
+    const totalPageH = isLong ? Math.round(contentBottom + inputH) : viewportH;
+
     const pathOf = (node) => {
         if (!node || node.nodeType !== 1) return null;
         if (node === document.documentElement) return 'html';
@@ -368,67 +352,154 @@ EXPAND_SCRIPT = """(selector) => {
         }
         return 'html>' + parts.join('>');
     };
-    const record = (node, props) => {
-        if (recorded.has(node)) return;
-        recorded.add(node);
-        saved.push({
-            path: pathOf(node),
-            origH: Math.round(node.getBoundingClientRect().height),
-            ...props
-        });
+    const selOf = (el) => {
+        if (!el || el.nodeType !== 1) return null;
+        if (el === document.documentElement) return 'html';
+        const tag = el.tagName.toLowerCase();
+        const cls = (typeof el.className === 'string' && el.className.trim())
+            ? '.' + el.className.trim().split(/\\s+/)[0] : '';
+        const stableCls = ['conversation-container', 'chat-history', 'chat-history-scroll-container',
+            'content-wrapper', 'chat-window', 'content-container', 'main-content',
+            'xap-uploader-dropzone', 'chat-app'].find((c) =>
+                (typeof el.className === 'string') && el.className.split(/\\s+/).includes(c));
+        if (stableCls) return stableCls === 'chat-history' ? 'infinite-scroller.chat-history' : '.' + stableCls;
+        if (tag === 'bard-sidenav' || tag === 'bard-sidenav-content'
+            || tag === 'chat-window' || tag === 'infinite-scroller') {
+            return tag;
+        }
+        return cls ? tag + cls : (el.id ? '#' + el.id : tag);
     };
-    let cur = el;
+    const rec = (el) => ({
+        path: pathOf(el),
+        sel: selOf(el),
+        h: el.style.height || '',
+        minH: el.style.minHeight || '',
+        maxH: el.style.maxHeight || '',
+        overflow: el.style.overflow || '',
+        overflowY: el.style.overflowY || '',
+        backgroundColor: el.style.backgroundColor || '',
+        alignSelf: el.style.alignSelf || '',
+        position: el.style.position || '',
+        bottom: el.style.bottom || '',
+        left: el.style.left || '',
+        width: el.style.width || '',
+        zIndex: el.style.zIndex || '',
+        origH: Math.round(el.getBoundingClientRect().height),
+    });
+    const setH = (el, h) => {
+        el.style.setProperty('height', h, 'important');
+        el.style.setProperty('min-height', h, 'important');
+        el.style.setProperty('max-height', 'none', 'important');
+        el.style.setProperty('overflow', 'visible', 'important');
+        el.style.setProperty('overflow-y', 'visible', 'important');
+    };
+    const saved = [];
+
+    // 1. 对话区列：从 cc 上溯至 bard-sidenav-content
+    const column = [];
+    let cur = cc;
     while (cur) {
-        record(cur, {
-            h: cur.style.height || '',
-            minH: cur.style.minHeight || '',
-            maxH: cur.style.maxHeight || '',
-            overflow: cur.style.overflow || '',
-            overflowY: cur.style.overflowY || ''
-        });
-        cur.style.setProperty('height', 'auto', 'important');
-        cur.style.setProperty('min-height', 'auto', 'important');
-        cur.style.setProperty('max-height', 'none', 'important');
-        cur.style.setProperty('overflow', 'visible', 'important');
-        cur.style.setProperty('overflow-y', 'visible', 'important');
+        column.unshift(cur);
+        if ((cur.tagName || '').toLowerCase() === 'bard-sidenav-content') break;
         cur = cur.parentElement;
     }
-    record(document.documentElement, {
-        h: document.documentElement.style.height || '',
-        overflow: document.documentElement.style.overflow || ''
-    });
-    document.documentElement.style.setProperty('height', 'auto', 'important');
-    document.documentElement.style.setProperty('overflow', 'visible', 'important');
-    record(document.body, {
-        h: document.body.style.height || '',
-        overflow: document.body.style.overflow || ''
-    });
-    document.body.style.setProperty('height', 'auto', 'important');
-    document.body.style.setProperty('overflow', 'visible', 'important');
-    return { saved };
+    for (const el of column) {
+        saved.push(rec(el));
+        const isHistory = el.classList.contains('chat-history') || el.tagName.toLowerCase() === 'infinite-scroller';
+        if (el === cc) {
+            setH(el, 'auto');
+        } else if (isHistory) {
+            setH(el, chatHistoryH + 'px');
+        } else {
+            setH(el, totalPageH + 'px');
+        }
+    }
+
+    // 获取右侧对话区撑开后的实际真实总高度（包含输入框与免责声明的真实 margin/padding）
+    const bsc = document.querySelector('bard-sidenav-content');
+    const rightH = bsc ? Math.max(bsc.scrollHeight, Math.round(bsc.getBoundingClientRect().height)) : totalPageH;
+    const finalPageH = Math.max(rightH, viewportH);
+
+    // 2. 侧边栏列：精确对齐右侧实际总高度 finalPageH，保证侧边栏与主内容区完全平齐到底
+    const sideNav = document.querySelector('bard-sidenav');
+    if (sideNav) {
+        saved.push(rec(sideNav));
+        setH(sideNav, finalPageH + 'px');
+        
+        const sideContent = sideNav.querySelector('side-navigation-content');
+        if (sideContent) {
+            saved.push(rec(sideContent));
+            setH(sideContent, finalPageH + 'px');
+        }
+
+        const histCont = sideNav.querySelector('.sidenav-with-history-container');
+        if (histCont) {
+            saved.push(rec(histCont));
+            setH(histCont, finalPageH + 'px');
+        }
+
+        // 侧边栏历史滚动区：高度精确撑满，底部自然流出账号栏与免责声明平齐
+        const sideScroller = sideNav.querySelector('infinite-scroller.lr26-theme, bard-sidenav infinite-scroller');
+        if (sideScroller) {
+            saved.push(rec(sideScroller));
+            const scrollerTop = sideScroller.getBoundingClientRect().top || 124;
+            const scrollerH = Math.max(200, finalPageH - scrollerTop - 56);
+            sideScroller.style.setProperty('height', scrollerH + 'px', 'important');
+            sideScroller.style.setProperty('min-height', scrollerH + 'px', 'important');
+            sideScroller.style.setProperty('max-height', scrollerH + 'px', 'important');
+            sideScroller.style.setProperty('overflow', 'hidden', 'important');
+            sideScroller.style.setProperty('overflow-y', 'hidden', 'important');
+        }
+    }
+
+    // 3. 祖先（bard-sidenav-content 之上至 html）：仅放开 overflow
+    let up = column.length ? column[0].parentElement : null;
+    while (up) {
+        saved.push(rec(up));
+        setH(up, up.style.height || '');
+        if (up === document.documentElement) break;
+        up = up.parentElement;
+    }
+    return { saved, contentH: contentBottom, totalPageH: finalPageH };
 }"""
 
 # 还原整页拉伸脚本
 RESTORE_SCRIPT = """(payload) => {
     const saved = payload ? payload.saved : null;
     if (!Array.isArray(saved)) return;
-    const queryPath = (path) => {
-        if (!path) return null;
-        try { return document.querySelector(path); } catch (e) { return null; }
+    const locate = (item) => {
+        // 优先语义选择器（Angular 动态渲染下 :nth-child 路径可能失效）
+        if (item.sel) {
+            try {
+                const el = document.querySelector(item.sel);
+                if (el) return el;
+            } catch (e) { /* 忽略非法选择器 */ }
+        }
+        if (item.path) {
+            try { return document.querySelector(item.path); } catch (e) { return null; }
+        }
+        return null;
     };
     for (const item of saved) {
         if (!item) continue;
-        const node = queryPath(item.path);
+        const node = locate(item);
         if (!node) continue;
-        if (item.h !== undefined && item.h !== '') {
+        if (item.h !== undefined) {
             node.style.height = item.h;
-        } else if (item.h === '' && item.origH) {
+        } else if (item.origH) {
             node.style.height = item.origH + 'px';
         }
         if (item.minH !== undefined) node.style.minHeight = item.minH;
         if (item.maxH !== undefined) node.style.maxHeight = item.maxH;
         if (item.overflow !== undefined) node.style.overflow = item.overflow;
         if (item.overflowY !== undefined) node.style.overflowY = item.overflowY;
+        if (item.backgroundColor !== undefined) node.style.backgroundColor = item.backgroundColor;
+        if (item.alignSelf !== undefined) node.style.alignSelf = item.alignSelf;
+        if (item.position !== undefined) node.style.position = item.position;
+        if (item.bottom !== undefined) node.style.bottom = item.bottom;
+        if (item.left !== undefined) node.style.left = item.left;
+        if (item.width !== undefined) node.style.width = item.width;
+        if (item.zIndex !== undefined) node.style.zIndex = item.zIndex;
     }
     void document.body.offsetHeight;
 }"""

@@ -24,7 +24,6 @@ from .gemini_constants import (
     CLICK_MAKE_IMAGE_SCRIPT,
     CLICK_SHARE_ITEM_SCRIPT,
     CLICK_SHARE_MENU_SCRIPT,
-    CONVERSATION_CONTENT_SELECTOR,
     CONVERSATION_SELECTOR,
     CONVERSATION_TEXT_SCRIPT,
     DOWNLOAD_IMAGE_BUTTON,
@@ -692,6 +691,33 @@ class GeminiActions(PageActions):
             logger.warning(f"下载 Gemini 生成图片失败: {exc}")
             return None
 
+    async def try_download_generated_image(
+        self, save_dir: str, wait_s: int = 30
+    ) -> str | None:
+        """短轮询检测对话中是否生成了图片，有则下载（供 ask_gemini 用）。
+
+        ask_gemini 提问后 Gemini 可能在对话中直接出图（非纯文本回复），
+        此方法在回复完成后短暂轮询生成图信号，命中即下载。检测不到不报错，
+        返回 None，保证纯文本提问不受影响。
+
+        Args:
+            save_dir: 保存目录（自动创建）。
+            wait_s: 等待生成图出现的最大秒数。
+
+        Returns:
+            str | None: 保存的本地路径；未生成图或下载失败返回 None。
+        """
+        deadline = asyncio.get_running_loop().time() + wait_s
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                if bool(await self._page.evaluate(IMAGE_GENERATED_SCRIPT)):
+                    path = await self.download_generated_image(save_dir)
+                    return path
+            except Exception:  # noqa: BLE001 - 检测失败不阻塞
+                pass
+            await asyncio.sleep(POLL_INTERVAL_S)
+        return None
+
     async def generate_image(
         self,
         prompt: str,
@@ -843,56 +869,74 @@ class GeminiActions(PageActions):
             return []
 
     async def _scroll_paged_shots(self) -> list[str]:
-        """对对话内容容器滚动分片截图并拼接为长图。
+        """对对话滚动容器滚动分片截图并拼接为长图（整页撑开的兜底）。
 
         Gemini 为固定视口布局：``html`` 的 ``overflow:hidden`` 将整页
-        ``scrollHeight`` 锁死为视口高度，无法 ``full_page`` 撑开。外层
-        ``infinite-scroller`` 是虚拟滚动，其 ``scrollHeight`` 不承载完整内容。
-        真实内容完整渲染在 ``.conversation-container``（内容高度 = 完整对话
-        高度）。故将该容器临时设为可滚动（``overflow-y:auto`` + 视口高度），
+        ``scrollHeight`` 锁死为视口高度。对话内容完整渲染在
+        ``.conversation-container``，实际滚动发生在最近的祖先滚动容器
+        （``infinite-scroller.chat-history``，虚拟滚动层）。故取该滚动容器，
         回滚到顶部后逐段 ``scrollTop`` 递增、对容器做元素截图，最后纵向拼接。
 
         Returns:
             list[str]: 单张拼接长图 data URI；失败返回空列表。
         """
+        saved: dict[str, Any] | None = None
         try:
-            # 1. 把内容容器临时设为可滚动（记录原值供还原）
+            # 1. 定位对话滚动容器：.conversation-container 的最近可滚动祖先，
+            #    找不到回退 .conversation-container 自身
             setup = await self._page.evaluate(
-                """(sel) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return null;
+                """() => {
+                    const cc = document.querySelector('.conversation-container');
+                    if (!cc) return null;
+                    let el = cc;
+                    while (el) {
+                        const cs = getComputedStyle(el);
+                        const ov = cs.overflowY || cs.overflow || '';
+                        if (ov.includes('auto') || ov.includes('scroll')) break;
+                        el = el.parentElement;
+                    }
+                    if (!el) el = cc;
                     const saved = {
                         h: el.style.height, oy: el.style.overflowY,
                         maxH: el.style.maxHeight, top: el.scrollTop
                     };
-                    el.style.setProperty('overflow-y', 'auto', 'important');
-                    el.style.setProperty('height', '900px', 'important');
-                    el.style.setProperty('max-height', 'none', 'important');
                     return { saved, scrollH: el.scrollHeight, clientH: el.clientHeight };
-                }""",
-                CONVERSATION_CONTENT_SELECTOR,
+                }"""
             )
             if not setup:
                 logger.warning("截图失败：未找到对话内容容器")
                 return []
             saved = setup["saved"]
-            # 回滚到顶部
-            await self._page.evaluate(
-                """(sel) => { const el = document.querySelector(sel); if (el) el.scrollTop = 0; }""",
-                CONVERSATION_CONTENT_SELECTOR,
+            # 2. 给滚动容器打临时标记（Python 侧截图定位），并回滚到顶部
+            marked = await self._page.evaluate(
+                """() => {
+                    let el = document.querySelector('.conversation-container');
+                    while (el) {
+                        const cs = getComputedStyle(el);
+                        const ov = cs.overflowY || cs.overflow || '';
+                        if (ov.includes('auto') || ov.includes('scroll')) break;
+                        el = el.parentElement;
+                    }
+                    if (!el) return false;
+                    el.setAttribute('data-mofox-scroll', '1');
+                    el.scrollTop = 0;
+                    return true;
+                }"""
             )
+            if not marked:
+                logger.warning("截图失败：未定位到对话滚动容器")
+                return []
             await self._page.wait_for_timeout(200)
-            content_locator = self._page.locator(CONVERSATION_CONTENT_SELECTOR).first
+            content_locator = self._page.locator("[data-mofox-scroll]").first
             pieces: list[bytes] = []
             seen: set[int] = set()
             for _ in range(60):
                 info = await self._page.evaluate(
-                    """(sel) => {
-                        const el = document.querySelector(sel);
+                    """() => {
+                        const el = document.querySelector('[data-mofox-scroll]');
                         if (!el) return null;
                         return { top: el.scrollTop, max: el.scrollHeight - el.clientHeight };
-                    }""",
-                    CONVERSATION_CONTENT_SELECTOR,
+                    }"""
                 )
                 if info is None:
                     break
@@ -904,8 +948,10 @@ class GeminiActions(PageActions):
                 if info["top"] >= (info["max"] or 0) - 5:
                     break
                 await self._page.evaluate(
-                    """(sel) => { const el = document.querySelector(sel); el.scrollTop += 800; }""",
-                    CONVERSATION_CONTENT_SELECTOR,
+                    """() => {
+                        const el = document.querySelector('[data-mofox-scroll]');
+                        if (el) el.scrollTop += 800;
+                    }"""
                 )
                 await self._page.wait_for_timeout(350)
             if not pieces:
@@ -918,18 +964,18 @@ class GeminiActions(PageActions):
             logger.warning(f"截图失败：{exc}")
             return []
         finally:
-            # 还原内容容器样式
+            # 还原滚动容器样式并清除临时标记
             try:
                 await self._page.evaluate(
-                    """(sel, saved) => {
-                        const el = document.querySelector(sel);
+                    """(saved) => {
+                        const el = document.querySelector('[data-mofox-scroll]');
                         if (!el || !saved) return;
+                        el.removeAttribute('data-mofox-scroll');
                         el.style.height = saved.h;
                         el.style.overflowY = saved.oy;
                         el.style.maxHeight = saved.maxH;
                         el.scrollTop = saved.top;
                     }""",
-                    CONVERSATION_CONTENT_SELECTOR,
                     saved,
                 )
             except Exception:  # noqa: BLE001 - 还原失败不阻塞

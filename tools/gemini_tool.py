@@ -115,13 +115,54 @@ class AskGeminiAiTool(BaseTool):
         if not result.ok:
             return False, result.error or "向 Gemini 提问失败"
 
+        # Gemini 在对话中直接生成了图片：读取并发送到当前聊天
+        image_sent = await self._send_generated_image(result, stream_id)
+
+        summary = (
+            "这是 Gemini 的回复内容，请自然地向用户转述/消化，无需发送截图或链接。"
+            "conversation 为当前对话标题，后续追问可传同一标题回到此对话。"
+        )
+        if image_sent:
+            summary = (
+                "Gemini 在回答时直接生成了图片，图片已自动发送到当前聊天，"
+                "回复正文见 reply 字段，请一并自然转述。"
+            )
+
         return True, {
             "model": result.model_name,
             "reply": result.reply,
             "conversation": result.conversation,
-            "summary": "这是 Gemini 的回复内容，请自然地向用户转述/消化，无需发送截图或链接。conversation 为当前对话标题，后续追问可传同一标题回到此对话。",
+            "summary": summary,
             "upload": result.upload,
         }
+
+    @staticmethod
+    async def _send_generated_image(result: AskResult, stream_id: str) -> bool:
+        """将 Gemini 对话中生成的图片读取并发送到当前聊天。
+
+        Args:
+            result: Gemini 提问结果（image_path 非空时尝试发图）。
+            stream_id: 聊天流 ID。
+
+        Returns:
+            bool: 是否成功发送了图片。
+        """
+        if not result.image_path:
+            return False
+        try:
+            import base64 as _b64
+            import pathlib as _pl
+
+            raw = _pl.Path(result.image_path).read_bytes()
+            image_b64 = _b64.b64encode(raw).decode("ascii")
+            return bool(await send_api.send_image(
+                image_b64,
+                stream_id,
+                processed_plain_text="[Gemini 生成的图片]",
+            ))
+        except Exception as exc:  # noqa: BLE001 - 发图失败不阻塞回复
+            logger.warning(f"发送 Gemini 生成图片失败: {exc}")
+            return False
 
     @staticmethod
     async def _resolve_downloaded_file(stream_id: str, file_name: str) -> str | None:

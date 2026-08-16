@@ -205,7 +205,7 @@ class DeepseekSnapshotTool(BaseTool):
             sent = await send_api.send_image(
                 strip_data_uri_prefix(piece),
                 stream_id,
-                processed_plain_text="[AI 界面截图]",
+                processed_plain_text="[DeepSeek 界面截图]",
             )
             if not sent:
                 return False, "截图已生成但发送失败"

@@ -213,6 +213,9 @@ class BrowserSessionManager:
         self._decoration_theme = decoration_theme
         self._decoration_avatar_url = decoration_avatar_url
         self._sessions: dict[str, BrowserSession] = {}
+        # 按 session_key 的创建互斥锁：同一会话首次并发获取时只启动一个浏览器，
+        # 避免多个 Chrome 实例争用同一 profile 崩溃（exitCode=21）
+        self._create_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_task: asyncio.Task | None = None
 
     @property
@@ -305,46 +308,65 @@ class BrowserSessionManager:
             session.touch()
             return session
 
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as exc:  # pragma: no cover - 依赖缺失时
-            raise RuntimeError("Playwright 未安装，插件启动时会自动安装") from exc
+        # 同 key 的创建互斥：并发首次调用只启动一个浏览器，避免争用同一 profile
+        lock = self._create_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._create_locks[session_key] = lock
+        async with lock:
+            # 锁内二次检查（等待锁期间可能有其他协程已创建）
+            session = self._sessions.get(session_key)
+            if session is not None:
+                session.touch()
+                return session
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError as exc:  # pragma: no cover - 依赖缺失时
+                raise RuntimeError("Playwright 未安装，插件启动时会自动安装") from exc
 
-        profile_dir = self._profile_root / theme
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        url = self._site_url(theme)
-        p = await async_playwright().start()
-        launch_kwargs: dict[str, Any] = {
-            "user_data_dir": str(profile_dir),
-            "headless": self._headless,
-            "viewport": self.viewport,
-            "device_scale_factor": self._device_scale_factor,
-            "permissions": ["clipboard-read", "clipboard-write"],
-        }
-        # 优先使用配置的浏览器路径；未配置时自动探测正式版 Chrome
-        # （Playwright 自带 Chromium 的自动化指纹会被 Google 风控判定并登出）
-        browser_path = self._browser_path or _default_browser_path()
-        if browser_path:
-            launch_kwargs["executable_path"] = browser_path
-            # 抹除自动化指纹（webdriver 等），与登录环境一致，避免登录态被风控失效
-            launch_kwargs.setdefault("args", []).extend(
-                ["--disable-blink-features=AutomationControlled", "--disable-infobars"]
-            )
-            launch_kwargs.setdefault("ignore_default_args", []).append("--enable-automation")
-        if self._proxy_url:
-            launch_kwargs["proxy"] = {"server": self._proxy_url}
-        context = await p.chromium.launch_persistent_context(**launch_kwargs)
-        page = context.pages[0] if context.pages else await context.new_page()
-        if browser_path:
-            await page.add_init_script(STEALTH_INIT_SCRIPT)
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(3000)
+            profile_dir = self._profile_root / theme
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            url = self._site_url(theme)
+            p = await async_playwright().start()
+            launch_kwargs: dict[str, Any] = {
+                "user_data_dir": str(profile_dir),
+                "headless": self._headless,
+                "viewport": self.viewport,
+                "device_scale_factor": self._device_scale_factor,
+                "permissions": ["clipboard-read", "clipboard-write"],
+            }
+            # 优先使用配置的浏览器路径；未配置时自动探测正式版 Chrome
+            # （Playwright 自带 Chromium 的自动化指纹会被 Google 风控判定并登出）
+            browser_path = self._browser_path or _default_browser_path()
+            if browser_path:
+                launch_kwargs["executable_path"] = browser_path
+                # 抹除自动化指纹（webdriver 等），与登录环境一致，避免登录态被风控失效
+                launch_kwargs.setdefault("args", []).extend(
+                    ["--disable-blink-features=AutomationControlled", "--disable-infobars"]
+                )
+                launch_kwargs.setdefault("ignore_default_args", []).append("--enable-automation")
+            if self._proxy_url:
+                launch_kwargs["proxy"] = {"server": self._proxy_url}
+            try:
+                context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            except Exception:
+                # 启动失败时释放 playwright 实例，避免资源泄漏后重试
+                try:
+                    await p.stop()
+                except Exception:  # noqa: BLE001 - 关闭失败不掩盖原异常
+                    pass
+                raise
+            page = context.pages[0] if context.pages else await context.new_page()
+            if browser_path:
+                await page.add_init_script(STEALTH_INIT_SCRIPT)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
 
-        session = BrowserSession(stream_id=stream_id, context=context, playwright=p, page=page)
-        self._sessions[session_key] = session
-        self._ensure_cleanup_task()
-        logger.info(f"浏览器会话已创建（theme={theme}, stream={stream_id}）")
-        return session
+            session = BrowserSession(stream_id=stream_id, context=context, playwright=p, page=page)
+            self._sessions[session_key] = session
+            self._ensure_cleanup_task()
+            logger.info(f"浏览器会话已创建（theme={theme}, stream={stream_id}）")
+            return session
 
     def touch(self, stream_id: str, theme: str = "") -> None:
         """刷新会话活动时间。

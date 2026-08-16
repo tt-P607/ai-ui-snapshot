@@ -62,6 +62,8 @@ class AskResult:
             LLM 记住对话身份；未取到时为空字符串）。
         model_name: 回复来源标识。
         upload: 上传说明（附加了图片/文件时非空）。
+        image_path: Gemini 对话中生成图片的本地下载路径（ask_gemini 检测到
+            生成图并成功下载时非空；纯文本回复时为空）。
     """
 
     ok: bool = False
@@ -72,6 +74,7 @@ class AskResult:
     conversation: str = ""
     model_name: str = "deepseek.com"
     upload: str = ""
+    image_path: str = ""
 
 
 async def resolve_media_path(media_id: str) -> str | None:
@@ -486,6 +489,16 @@ async def ask_gemini(
         if not done:
             return AskResult(ok=False, error="等待 Gemini 回复超时")
 
+        # 3b. 检测对话中是否生成了图片（AI 直接出图时自动下载；纯文本回复跳过）
+        image_path = ""
+        try:
+            image_path = await actions.try_download_generated_image(
+                save_dir="data/ai_ui_snapshot_profile/gemini/images",
+                wait_s=30,
+            ) or ""
+        except Exception as exc:  # noqa: BLE001 - 检测/下载失败不阻塞提问
+            logger.warning(f"检测 Gemini 生成图片失败: {exc}")
+
         # 4. 按 return_scope 取信息返回文本
         if return_scope == "full":
             content = await actions.get_conversation_text(scope="full")
@@ -511,6 +524,7 @@ async def ask_gemini(
                 conversation=current_title,
                 model_name="gemini.google.com",
                 upload=_upload_notice(local_path),
+                image_path=image_path,
             )
         return AskResult(
             ok=True,
@@ -518,6 +532,7 @@ async def ask_gemini(
             conversation=current_title,
             model_name="gemini.google.com",
             upload=_upload_notice(local_path),
+            image_path=image_path,
         )
     finally:
         session.release()
