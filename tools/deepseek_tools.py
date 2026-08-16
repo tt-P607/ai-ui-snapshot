@@ -1,12 +1,13 @@
-"""LLM 工具集：向 DeepSeek 提问 / 直接截图 / 直接取分享链接。
+"""LLM 工具集：DeepSeek 提问 / 历史会话 / 状态查询 / 截图 / 分享链接。
 
-把 DeepSeek 网页操作封装为三个独立的高层工具，bot 通过参数使用，无需逐步
-操控浏览器：
+把 DeepSeek 网页操作封装为五个高层工具，bot 通过参数使用，无需逐步操控浏览器：
 - ask_ai_and_snapshot：真实提问，返回回复文本（内部消化转述）。
 - deepseek_snapshot：直接截取当前/指定对话界面为长截图并发送，不提问。
 - deepseek_share：直接获取当前/指定对话的官方分享链接，不提问。
+- deepseek_history：列出历史会话 / 进入指定会话（返回完整上下文 + 开关状态）。
+- deepseek_state：查询当前对话模式与深度思考/联网搜索开关状态。
 
-三个工具共用服务层（snapshot_service）的提问 / 截图 / 分享入口。
+工具共用服务层（service）的提问 / 截图 / 分享 / 历史入口。
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseTool
 
 from ..config import AiUiSnapshotConfig
-from ..services.snapshot_service import (
+from ..services.base.browser_session import get_manager
+from ..services.service import (
     AskResult,
     ask_deepseek,
     capture_snapshot,
@@ -26,11 +28,12 @@ from ..services.snapshot_service import (
     resolve_media_path,
     strip_data_uri_prefix,
 )
+from .base import _ToolBase
 
 logger = get_logger("ai_ui_snapshot.tool")
 
 
-class AskAiAndSnapshotTool(BaseTool):
+class AskAiAndSnapshotTool(_ToolBase):
     """向 DeepSeek 真实提问，返回回复内容供内部消化转述。"""
 
     name: str = "ask_ai_and_snapshot"
@@ -58,7 +61,7 @@ class AskAiAndSnapshotTool(BaseTool):
         mode: Annotated[str, "对话模式：快速模式/专家模式/识图模式（或 快速/专家/识图），空则沿用当前会话模式（首次默认快速）；每个对话模式一经选定即锁定不可切换"] = "",
         deepthink: Annotated[bool | None, "是否开启深度思考：true/false，默认 true"] = True,
         search: Annotated[bool | None, "是否开启联网搜索：true/false，默认 true；专家/识图模式不支持时自动忽略"] = True,
-        new_chat: Annotated[bool, "旧参数：是否先开一个新对话再提问（等价 conversation=__new__，保留兼容）"] = False,
+        new_chat: Annotated[bool, "是否先开一个新对话再提问（等价 conversation=__new__）"] = False,
         conversation: Annotated[str, "对话定位：空（默认）沿用当前对话；历史会话精确标题则进入继续（用 deepseek_history list 获取标题，未命中则新建）；'__new__' 强制开新对话"] = "",
         image_id: Annotated[str, "附带提问的图片 media_id（聊天图片占位符 [图片(media_id)] 中的哈希），可空"] = "",
         file_name: Annotated[str, "附带提问的已下载文件名（media_retriever 已下载文件），可空"] = "",
@@ -71,7 +74,7 @@ class AskAiAndSnapshotTool(BaseTool):
             mode: 对话模式。
             deepthink: 深度思考开关。
             search: 智能搜索开关。
-            new_chat: 旧参数：是否先开新对话（等价 conversation=__new__）。
+            new_chat: 是否先开新对话（等价 conversation=__new__）。
             conversation: 对话定位（空沿用当前 / 精确标题进入 / __new__ 新建）。
             image_id: 附带图片 media_id（可空）。
             file_name: 附带已下载文件名（可空）。
@@ -126,35 +129,8 @@ class AskAiAndSnapshotTool(BaseTool):
             "upload": result.upload,
         }
 
-    @staticmethod
-    async def _resolve_downloaded_file(stream_id: str, file_name: str) -> str | None:
-        """经 media_retriever Service 解析已下载文件路径（插件间解耦）。
 
-        Args:
-            stream_id: 聊天流 ID。
-            file_name: 已下载文件名。
-
-        Returns:
-            str | None: 本地文件路径；获取失败返回 None。
-        """
-        try:
-            from src.app.plugin_system.api.service_api import get_service
-
-            service = get_service("media_retriever:service:media_retriever")
-            if service is None:
-                logger.warning("未找到 media_retriever Service，无法解析已下载文件")
-                return None
-            resolve = getattr(service, "resolve_downloaded_file", None)
-            if not callable(resolve):
-                return None
-            result = resolve(stream_id, file_name)
-            return str(result) if result else None
-        except Exception as exc:  # noqa: BLE001 - 服务不可用时降级
-            logger.warning(f"解析 media_retriever 已下载文件失败: {exc}")
-            return None
-
-
-class DeepseekSnapshotTool(BaseTool):
+class DeepseekSnapshotTool(_ToolBase):
     """直接截取 DeepSeek 对话界面为长截图并发送，不提问、不改模式。"""
 
     name: str = "deepseek_snapshot"
@@ -216,7 +192,7 @@ class DeepseekSnapshotTool(BaseTool):
         }
 
 
-class DeepseekShareTool(BaseTool):
+class DeepseekShareTool(_ToolBase):
     """直接获取 DeepSeek 当前/指定对话的官方公开分享链接，不提问。"""
 
     name: str = "deepseek_share"
@@ -260,9 +236,103 @@ class DeepseekShareTool(BaseTool):
         }
 
 
-# 供插件装配导出的工具类列表
-SNAPSHOT_TOOLS: list[type[BaseTool]] = [
+class DeepseekHistoryTool(_ToolBase):
+    """DeepSeek 历史会话：列出 / 进入。"""
+
+    name: str = "deepseek_history"
+    description: str = (
+        "操作 DeepSeek 的历史会话，像真人翻看之前的对话。"
+        "action=list 列出侧边栏的历史会话标题；action=open 需提供 title 进入该会话，"
+        "进入后工具会返回该会话的完整上下文与当前开关状态，之后可用 "
+        "ask_ai_and_snapshot 继续在这个会话里对话。"
+    )
+
+    async def execute(
+        self,
+        action: Annotated[str, "操作：list（列出历史会话）/ open（进入指定会话）"],
+        title: Annotated[str, "action=open 时的历史会话标题（list 返回的标题）"] = "",
+    ) -> tuple[bool, str | dict[str, Any]]:
+        """执行历史会话操作。
+
+        Args:
+            action: list / open。
+            title: open 时的会话标题。
+
+        Returns:
+            tuple[bool, str | dict]: (是否成功, 结果或错误)。
+        """
+        try:
+            actions = await self._actions()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"浏览器会话不可用: {exc}"
+        if action == "list":
+            items = await actions.list_conversations()
+            return True, {"histories": items}
+        if action == "open":
+            if not title:
+                return False, "open 操作需提供 title"
+            ok = await actions.open_conversation(title)
+            if not ok:
+                return False, f"未找到历史会话: {title}"
+            context = await actions.get_conversation_text(scope="full")
+            mode = await actions.get_mode()
+            toggles = await actions.get_toggles()
+            # 进入历史会话后，锁定该会话原本的模式，后续提问沿用（不可切换）
+            stream_id = self.get_current_stream_id()
+            current_id = await actions.get_active_conversation_id()
+            current_title = await actions.get_active_conversation_title()
+            if mode and current_id:
+                get_manager().lock_conversation_mode(stream_id, current_id, mode, current_title or title)
+            else:
+                get_manager().set_active_conversation(stream_id, current_id, current_title or title)
+            return True, {
+                "opened": title,
+                "mode": mode or "未知",
+                "toggles": toggles,
+                "locked_mode": mode or "未知",
+                "conversation": current_title or title,
+                "context": context,
+                "tip": "已进入该会话（模式已锁定，不可切换），可用 ask_ai_and_snapshot 继续对话。conversation 字段为当前对话标题，后续追问可传同一标题。",
+            }
+        return False, f"未知操作: {action}（可选 list/open）"
+
+
+class DeepseekStateTool(_ToolBase):
+    """查询 DeepSeek 当前模式与开关状态。"""
+
+    name: str = "deepseek_state"
+    description: str = (
+        "查询当前 DeepSeek 对话的模式（快速/专家/识图）以及深度思考、联网搜索"
+        "开关是否开启。提问前调用可确认当前配置，或在需要时参考。"
+    )
+
+    async def execute(self) -> tuple[bool, str | dict[str, Any]]:
+        """执行状态查询。
+
+        Returns:
+            tuple[bool, str | dict]: (是否成功, 模式/开关/锁定状态)。
+        """
+        try:
+            actions = await self._actions()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"浏览器会话不可用: {exc}"
+        stream_id = self.get_current_stream_id()
+        mode = await actions.get_mode()
+        toggles = await actions.get_toggles()
+        locked = get_manager().get_locked_mode(stream_id)
+        return True, {
+            "mode": mode or "未知",
+            "locked_mode": locked or "未锁定",
+            "tip": "会话模式一经选定即锁定，换模式需开新对话。",
+            **toggles,
+        }
+
+
+# 供插件装配导出的 DeepSeek 工具类列表
+DEEPSEEK_TOOLS: list[type[BaseTool]] = [
     AskAiAndSnapshotTool,
     DeepseekSnapshotTool,
     DeepseekShareTool,
+    DeepseekHistoryTool,
+    DeepseekStateTool,
 ]

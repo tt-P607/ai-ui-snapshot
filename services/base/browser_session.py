@@ -3,6 +3,8 @@
 LLM 处理一个任务时临时打开一个 Playwright 浏览器（复用 bot 账号登录态），
 任务过程内按会话（stream_id）共享同一个页面，支持跨多次工具调用保持状态；
 任务结束（空闲超时无活动）自动关闭，插件卸载时全部关闭，不常驻占用资源。
+站点（deepseek/gemini 等）通过 ``theme`` 参数路由到各自的登录态 profile
+与默认 URL，会话以 (theme, stream_id) 隔离。
 """
 
 from __future__ import annotations
@@ -159,8 +161,9 @@ class BrowserSession:
 class BrowserSessionManager:
     """按 stream_id 管理任务级临时浏览器会话。
 
-    用法：进程内单例。``get(stream_id)`` 取或建会话；``touch(stream_id)``
+    用法：进程内单例。``get(stream_id, theme)`` 取或建会话；``touch(stream_id)``
     刷新活动时间；后台任务定期关闭空闲会话；``close_all`` 关闭全部。
+    站点主题（deepseek/gemini）决定登录态 profile 目录与默认 URL。
     """
 
     def __init__(
@@ -168,6 +171,7 @@ class BrowserSessionManager:
         *,
         profile_root: str,
         theme: str = "deepseek",
+        site_urls: dict[str, str] | None = None,
         idle_timeout_s: int = 600,
         headless: bool = True,
         browser_path: str = "",
@@ -185,8 +189,8 @@ class BrowserSessionManager:
 
         Args:
             profile_root: 持久化浏览器会话根目录（含登录态）。
-            theme: 站点主题（deepseek / gemini），用于定位登录态目录。
-            url: 打开的目标网址。
+            theme: 默认站点主题（deepseek / gemini）。
+            site_urls: 站点主题 → 默认 URL 映射（缺省用内置 deepseek/gemini 地址）。
             idle_timeout_s: 空闲自动关闭秒数。
             headless: 是否无头。
             browser_path: Chromium 可执行路径（可空）。
@@ -200,6 +204,7 @@ class BrowserSessionManager:
         """
         self._profile_root = pathlib.Path(profile_root)
         self._theme = theme
+        self._site_urls = dict(site_urls or {})
         self._idle_timeout_s = idle_timeout_s
         self._headless = headless
         self._browser_path = browser_path
@@ -258,9 +263,8 @@ class BrowserSessionManager:
         """自定义 Google 账号头像 URL。"""
         return self._decoration_avatar_url
 
-    @staticmethod
-    def _site_url(theme: str) -> str:
-        """按站点主题返回默认网址（站点地址由代码映射，不暴露配置）。
+    def _site_url(self, theme: str) -> str:
+        """按站点主题返回默认网址（站点地址由映射决定，不暴露配置）。
 
         Args:
             theme: 站点主题（deepseek / gemini）。
@@ -268,7 +272,7 @@ class BrowserSessionManager:
         Returns:
             str: 目标网址。
         """
-        return {
+        return self._site_urls.get(theme) or {
             "deepseek": "https://chat.deepseek.com/",
             "gemini": "https://gemini.google.com/app",
         }.get(theme, "https://chat.deepseek.com/")

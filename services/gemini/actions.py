@@ -2,7 +2,7 @@
 
 组合通用页面操作（:class:`PageActions`）与 Gemini 站点语义（模型切换、提问、
 等待回复、长截图、附件上传），供上层业务（snapshot_service）使用。站点专属
-常量与脚本集中在 :mod:`gemini_constants`，选择器变动仅需在该处同步。
+常量与脚本集中在 :mod:`constants`，选择器变动仅需在该处同步。
 """
 
 from __future__ import annotations
@@ -10,15 +10,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import pathlib
-import time
 from typing import Any
-
 
 from src.app.plugin_system.api.log_api import get_logger
 
-from .browser_page import PageActions
-from .deepseek_constants import BROWSER_CHROME_REMOVE_SCRIPT, BROWSER_CHROME_SCRIPT
-from .gemini_constants import (
+from ..base.page_actions import PageActions
+from ..base.utils import data_uri, normalize_theme, resolve_auto_theme
+from .constants import (
     ACTIVE_CONVERSATION_ID_SCRIPT,
     ACTIVE_CONVERSATION_TITLE_SCRIPT,
     CLICK_MAKE_IMAGE_SCRIPT,
@@ -57,29 +55,21 @@ from .gemini_constants import (
 logger = get_logger("ai_ui_snapshot.gemini_actions")
 
 
-def data_uri(data: bytes) -> str:
-    """将 PNG 字节流转为 data URI。
-
-    Args:
-        data: PNG 字节流。
-
-    Returns:
-        str: data URI。
-    """
-    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
-
-
 class GeminiActions(PageActions):
     """Gemini 专属浏览器动作（组合通用页面操作）。
 
     在 :class:`PageActions` 通用能力之上，封装 Gemini 站点语义动作：模型读写
     与切换、提问与等待回复、长截图（分片）、附件上传。站点常量见
-    :mod:`gemini_constants`。
-
-    Attributes:
-        page: 当前页面对象。
-        max_screenshot_height: 长截图单张最大高度（像素），超出分片。
+    :mod:`constants`。
     """
+
+    conversation_selector: str = CONVERSATION_SELECTOR
+    visibility_script: str = VISIBILITY_SCRIPT
+    generating_script: str = GENERATING_SCRIPT
+    poll_interval_s: float = POLL_INTERVAL_S
+    conversation_text_script: str = CONVERSATION_TEXT_SCRIPT
+    active_title_script: str = ACTIVE_CONVERSATION_TITLE_SCRIPT
+    active_id_script: str = ACTIVE_CONVERSATION_ID_SCRIPT
 
     def __init__(
         self,
@@ -103,36 +93,15 @@ class GeminiActions(PageActions):
             decoration_theme: 外壳配色（auto/light/dark）。
             decoration_avatar_url: 自定义 Google 账号头像 URL。
         """
-        super().__init__(page)
-        self._max_screenshot_height = max_screenshot_height
-        self._touch_cb = touch_cb
-        self._theme = self._normalize_theme(theme)
-        self._decoration_enabled = decoration_enabled
-        self._decoration_theme = decoration_theme
-        self._decoration_avatar_url = decoration_avatar_url
-
-    @staticmethod
-    def _normalize_theme(theme: str) -> str:
-        """归一化主题为 auto/light/dark。
-
-        Args:
-            theme: 原始输入（auto/light/dark，大小写不敏感）。
-
-        Returns:
-            str: auto/light/dark 之一；无法识别时回退 auto。
-        """
-        value = (theme or "").strip().lower()
-        return value if value in ("auto", "light", "dark") else "auto"
-
-    @staticmethod
-    def _resolve_auto_theme() -> str:
-        """按本地时间解析 auto 主题：18:00-06:00 为深色，其余浅色。
-
-        Returns:
-            str: light / dark。
-        """
-        hour = time.localtime().tm_hour
-        return "dark" if hour >= 18 or hour < 6 else "light"
+        super().__init__(
+            page,
+            touch_cb=touch_cb,
+            max_screenshot_height=max_screenshot_height,
+            decoration_enabled=decoration_enabled,
+            decoration_theme=normalize_theme(decoration_theme),
+            decoration_avatar_url=decoration_avatar_url,
+        )
+        self._theme = normalize_theme(theme)
 
     async def get_theme(self) -> str:
         """读取当前页面主题（body class）。
@@ -154,8 +123,8 @@ class GeminiActions(PageActions):
         Returns:
             str: 实际应用的主题（light/dark）。
         """
-        target = self._normalize_theme(theme) if theme is not None else self._theme
-        resolved = self._resolve_auto_theme() if target == "auto" else target
+        target = normalize_theme(theme) if theme is not None else self._theme
+        resolved = resolve_auto_theme() if target == "auto" else target
         try:
             await self._page.evaluate(SET_THEME_SCRIPT, resolved)
             await self._page.wait_for_timeout(200)
@@ -343,63 +312,6 @@ class GeminiActions(PageActions):
         except Exception as exc:  # noqa: BLE001 - 发送失败
             return False, f"发送失败: {exc}"
 
-    async def wait_reply_done(self, timeout_s: int = 240) -> tuple[bool, str]:
-        """轮询等待 AI 回复完成，并返回干净的最新一条模型回复。
-
-        以生成中指示器（"停止回答"按钮）作强信号：只要仍在生成绝不判完成；
-        指示器消失后叠加"最新回复长度连续稳定"兜底判定。
-
-        Args:
-            timeout_s: 超时秒数。
-
-        Returns:
-            tuple[bool, str]: (是否完成, 最新一条模型回复正文)。
-        """
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        last_len = 0
-        stable = 0
-        text = ""
-        while asyncio.get_running_loop().time() < deadline:
-            if self._touch_cb is not None:
-                try:
-                    self._touch_cb()
-                except Exception:  # noqa: BLE001 - 保活失败不影响等待
-                    pass
-            try:
-                generating = bool(await self._page.evaluate(GENERATING_SCRIPT))
-                text = await self.get_conversation_text(scope="last")
-            except Exception:  # noqa: BLE001 - 页面未就绪
-                generating = False
-                text = ""
-            if generating:
-                stable = 0
-                last_len = len(text)
-                await asyncio.sleep(POLL_INTERVAL_S)
-                continue
-            if len(text) > last_len:
-                last_len = len(text)
-                stable = 0
-            else:
-                stable += 1
-            if stable >= 4 and last_len > 10:
-                return True, text
-            await asyncio.sleep(POLL_INTERVAL_S)
-        return False, text
-
-    async def get_conversation_text(self, scope: str = "last") -> str:
-        """按作用域提取对话文本（模型回复正文）。
-
-        Args:
-            scope: last（默认，最新一条模型回复）/ full（全部模型回复）。
-
-        Returns:
-            str: 提取的对话文本；无消息时返回空字符串。
-        """
-        try:
-            return str(await self._page.evaluate(CONVERSATION_TEXT_SCRIPT, scope) or "")
-        except Exception:  # noqa: BLE001 - 页面未就绪
-            return ""
-
     async def create_share_link(self, timeout_s: int = 30) -> str | None:
         """创建并获取当前对话的 Gemini 公开分享链接。
 
@@ -434,49 +346,6 @@ class GeminiActions(PageActions):
             return None
         except Exception:  # noqa: BLE001 - 分享失败
             return None
-
-    # ------------------------------------------------------------------
-    # 历史会话
-    # ------------------------------------------------------------------
-
-    async def get_active_conversation_title(self) -> str:
-        """读取当前活跃对话的标题（侧边栏选中项首行）。
-
-        Returns:
-            str: 当前活跃对话标题；未取到时为空字符串。
-        """
-        try:
-            return str(await self._page.evaluate(ACTIVE_CONVERSATION_TITLE_SCRIPT) or "").strip()
-        except Exception:  # noqa: BLE001 - 页面未就绪
-            return ""
-
-    async def wait_conversation_title(self, timeout_s: int = 8) -> str:
-        """等待新对话标题由 AI 生成后返回（首条提问时标题异步生成）。
-
-        Args:
-            timeout_s: 等待超时秒数。
-
-        Returns:
-            str: 生成的对话标题；超时仍未生成时返回空字符串。
-        """
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        while asyncio.get_running_loop().time() < deadline:
-            title = await self.get_active_conversation_title()
-            if title:
-                return title
-            await asyncio.sleep(1)
-        return ""
-
-    async def get_active_conversation_id(self) -> str:
-        """读取当前活跃对话的稳定 ID（URL 中 /app/<id> 的会话 UUID）。
-
-        Returns:
-            str: 当前会话稳定 ID；未取到时为空字符串。
-        """
-        try:
-            return str(await self._page.evaluate(ACTIVE_CONVERSATION_ID_SCRIPT) or "").strip()
-        except Exception:  # noqa: BLE001 - 页面未就绪
-            return ""
 
     async def new_chat(self) -> bool:
         """开启一个新对话（点击侧边栏"发起新对话"）。
@@ -773,13 +642,6 @@ class GeminiActions(PageActions):
     # 长截图
     # ------------------------------------------------------------------
 
-    async def _conversation_visible(self) -> bool:
-        """判断消息容器当前是否可见（未撑开状态下存在且非隐藏）。"""
-        try:
-            return bool(await self._page.evaluate(VISIBILITY_SCRIPT, CONVERSATION_SELECTOR))
-        except Exception:  # noqa: BLE001 - 页面未就绪
-            return False
-
     async def screenshot(self, region: str = "conversation", think: str = "auto") -> list[str]:
         """截取整页为单张长截图 data URI（含侧边栏，无重复拼接）。
 
@@ -981,33 +843,6 @@ class GeminiActions(PageActions):
             except Exception:  # noqa: BLE001 - 还原失败不阻塞
                 pass
 
-    @staticmethod
-    def _resolve_avatar_url(avatar_url: str) -> str:
-        """解析头像 URL，若为空则尝试自动加载已持久化的真实 Google 头像。
-
-        Args:
-            avatar_url: 配置或传入的头像地址。
-
-        Returns:
-            str: 头像 URL 或包含真实头像数据的 base64 data URI。
-        """
-        if avatar_url:
-            return avatar_url
-        import base64 as _b64
-
-        for p in (
-            pathlib.Path("data/ai_ui_snapshot_profile/gemini/google_avatar.png"),
-            pathlib.Path("data/ai_ui_snapshot_profile/deepseek/google_avatar.png"),
-        ):
-            if p.is_file():
-                try:
-                    data = p.read_bytes()
-                    if data:
-                        return "data:image/png;base64," + _b64.b64encode(data).decode("ascii")
-                except Exception:  # noqa: BLE001
-                    pass
-        return ""
-
     async def _capture_chrome_banner(self, width: int) -> bytes | None:
         """独立渲染并截取浏览器外壳顶栏横幅（标签页/地址栏/头像）。
 
@@ -1035,6 +870,8 @@ class GeminiActions(PageActions):
                     return true;
                 }"""
             )
+            from ..base.chrome_banner import BROWSER_CHROME_SCRIPT
+
             await self._page.evaluate(
                 BROWSER_CHROME_SCRIPT,
                 {
@@ -1052,73 +889,9 @@ class GeminiActions(PageActions):
             return None
         finally:
             try:
+                from ..base.chrome_banner import BROWSER_CHROME_REMOVE_SCRIPT
+
                 await self._page.evaluate(BROWSER_CHROME_REMOVE_SCRIPT)
             except Exception:  # noqa: BLE001
                 pass
 
-    @staticmethod
-    def _prepend_chrome_banner(piece_bytes: bytes, banner_bytes: bytes) -> bytes:
-        """使用 Pillow 将浏览器外壳横幅拼接到首张截图最顶端。
-
-        Args:
-            piece_bytes: 首张截图 PNG 字节流。
-            banner_bytes: 浏览器外壳横幅 PNG 字节流。
-
-        Returns:
-            bytes: 拼接后的 PNG 字节流。
-        """
-        try:
-            from PIL import Image
-
-            import io
-
-            piece_img = Image.open(io.BytesIO(piece_bytes))
-            banner_img = Image.open(io.BytesIO(banner_bytes))
-            if banner_img.width != piece_img.width:
-                scale = piece_img.width / banner_img.width
-                resample = Image.Resampling.LANCZOS
-                banner_img = banner_img.resize(
-                    (piece_img.width, max(1, round(banner_img.height * scale))),
-                    resample,
-                )
-            canvas = Image.new(
-                "RGB",
-                (piece_img.width, banner_img.height + piece_img.height),
-                "white",
-            )
-            canvas.paste(banner_img, (0, 0))
-            canvas.paste(piece_img, (0, banner_img.height))
-            buf = io.BytesIO()
-            canvas.save(buf, format="PNG")
-            return buf.getvalue()
-        except Exception:  # noqa: BLE001 - 拼接失败退回首张
-            return piece_bytes
-
-    @staticmethod
-    def _vstack_png(pieces: list[bytes]) -> bytes:
-        """纵向拼接多张 PNG（Pillow 依赖可选，缺失时退回首张）。
-
-        Args:
-            pieces: PNG 字节列表（自上而下顺序）。
-
-        Returns:
-            bytes: 拼接后的 PNG 字节。
-        """
-        try:
-            from PIL import Image
-
-            import io
-
-            imgs = [Image.open(io.BytesIO(b)).convert("RGB") for b in pieces]
-            width = max(im.width for im in imgs)
-            total_h = sum(im.height for im in imgs)
-            canvas = Image.new("RGB", (width, total_h), "white")
-            y = 0
-            for im in imgs:
-                canvas.paste(im, (0, y))
-                y += im.height
-            buf = io.BytesIO()
-            canvas.save(buf, format="PNG")
-            return buf.getvalue()
-        except Exception:  # noqa: BLE001 - 拼接失败退回首张
-            return pieces[0]

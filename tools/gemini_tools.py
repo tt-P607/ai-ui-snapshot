@@ -1,12 +1,13 @@
 """LLM 工具集：向 Gemini 提问 / 生成图片 / 获取分享链接。
 
-把 Gemini 网页操作封装为三个独立的高层工具，bot 通过参数使用，无需逐步
+把 Gemini 网页操作封装为四个独立的高层工具，bot 通过参数使用，无需逐步
 操控浏览器：
 - ask_gemini_ai：向 Gemini 真实提问（全模态上传图片/音频/视频/文档），返回回复文本。
 - gemini_generate_image：用 Gemini 原生能力生成图片（可带参考图改图）。
+- gemini_snapshot：直接截取当前/指定 Gemini 对话界面为长截图并发送，不提问。
 - gemini_share：获取当前/指定对话的公开分享链接。
 
-工具共用服务层（snapshot_service）的提问 / 生成 / 分享入口。
+工具共用服务层（service）的提问 / 生成 / 截图 / 分享入口。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseTool
 
 from ..config import AiUiSnapshotConfig
-from ..services.snapshot_service import (
+from ..services.service import (
     AskResult,
     ask_gemini,
     capture_gemini_snapshot,
@@ -27,6 +28,7 @@ from ..services.snapshot_service import (
     resolve_media_path,
     strip_data_uri_prefix,
 )
+from .base import _ToolBase
 
 logger = get_logger("ai_ui_snapshot.gemini_tool")
 
@@ -34,7 +36,7 @@ logger = get_logger("ai_ui_snapshot.gemini_tool")
 _DEFAULT_IMAGE_DIR = "data/ai_ui_snapshot_profile/gemini/images"
 
 
-class AskGeminiAiTool(BaseTool):
+class AskGeminiAiTool(_ToolBase):
     """向 Gemini 真实提问，返回回复内容供内部消化转述。"""
 
     name: str = "ask_gemini_ai"
@@ -164,35 +166,8 @@ class AskGeminiAiTool(BaseTool):
             logger.warning(f"发送 Gemini 生成图片失败: {exc}")
             return False
 
-    @staticmethod
-    async def _resolve_downloaded_file(stream_id: str, file_name: str) -> str | None:
-        """经 media_retriever Service 解析已下载文件路径（插件间解耦）。
 
-        Args:
-            stream_id: 聊天流 ID。
-            file_name: 已下载文件名。
-
-        Returns:
-            str | None: 本地文件路径；获取失败返回 None。
-        """
-        try:
-            from src.app.plugin_system.api.service_api import get_service
-
-            service = get_service("media_retriever:service:media_retriever")
-            if service is None:
-                logger.warning("未找到 media_retriever Service，无法解析已下载文件")
-                return None
-            resolve = getattr(service, "resolve_downloaded_file", None)
-            if not callable(resolve):
-                return None
-            result = resolve(stream_id, file_name)
-            return str(result) if result else None
-        except Exception as exc:  # noqa: BLE001 - 服务不可用时降级
-            logger.warning(f"解析 media_retriever 已下载文件失败: {exc}")
-            return None
-
-
-class GeminiGenerateImageTool(BaseTool):
+class GeminiGenerateImageTool(_ToolBase):
     """用 Gemini 原生能力生成图片（可带参考图改图）。"""
 
     name: str = "gemini_generate_image"
@@ -273,7 +248,7 @@ class GeminiGenerateImageTool(BaseTool):
         }
 
 
-class GeminiSnapshotTool(BaseTool):
+class GeminiSnapshotTool(_ToolBase):
     """直接截取 Gemini 对话界面为长截图并发送，不提问、不改设置。"""
 
     name: str = "gemini_snapshot"
@@ -290,7 +265,7 @@ class GeminiSnapshotTool(BaseTool):
     async def execute(
         self,
         conversation: Annotated[str, "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截；'__new__' 开新对话"] = "",
-        think: Annotated[str, "保留兼容：'auto'（默认）。Gemini 思考内容无独立折叠 UI，截图不展开/折叠思考"] = "auto",
+        think: Annotated[str, "'auto'（默认）。Gemini 思考内容无独立折叠 UI，截图不展开/折叠思考"] = "auto",
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：定位会话并直接截图发送。
 
@@ -332,7 +307,7 @@ class GeminiSnapshotTool(BaseTool):
         }
 
 
-class GeminiShareTool(BaseTool):
+class GeminiShareTool(_ToolBase):
     """获取 Gemini 当前/指定对话的公开分享链接。"""
 
     name: str = "gemini_share"
@@ -375,7 +350,7 @@ class GeminiShareTool(BaseTool):
         }
 
 
-# 供插件装配导出的工具类列表
+# 供插件装配导出的 Gemini 工具类列表
 GEMINI_TOOLS: list[type[BaseTool]] = [
     AskGeminiAiTool,
     GeminiGenerateImageTool,

@@ -14,10 +14,9 @@ from src.app.plugin_system.base import BasePlugin, register_plugin
 
 from .config import AiUiSnapshotConfig
 from .commands.ask_command import AiSnapshotCommand
-from .services import browser_session
-from .tools.browser_tool import BROWSER_TOOLS
-from .tools.gemini_tool import GEMINI_TOOLS
-from .tools.snapshot_tool import SNAPSHOT_TOOLS
+from .services.base import browser_session
+from .tools.deepseek_tools import DEEPSEEK_TOOLS
+from .tools.gemini_tools import GEMINI_TOOLS
 
 logger = log_api.get_logger("ai_ui_snapshot")
 
@@ -73,10 +72,10 @@ class AiUiSnapshotPlugin(BasePlugin):
         if isinstance(config, AiUiSnapshotConfig) and not config.plugin.enabled:
             return []
         if not isinstance(config, AiUiSnapshotConfig):
-            return [*BROWSER_TOOLS, *SNAPSHOT_TOOLS, *GEMINI_TOOLS, AiSnapshotCommand]
+            return [*DEEPSEEK_TOOLS, *GEMINI_TOOLS, AiSnapshotCommand]
         components: list[type] = []
         if config.sites.deepseek:
-            components.extend([*BROWSER_TOOLS, *SNAPSHOT_TOOLS, AiSnapshotCommand])
+            components.extend([*DEEPSEEK_TOOLS, AiSnapshotCommand])
         if config.sites.gemini:
             components.extend(GEMINI_TOOLS)
         return components

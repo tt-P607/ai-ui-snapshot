@@ -1,6 +1,6 @@
 """Gemini (Google AI) 站点专属常量、选择器与页面脚本。
 
-依据对已登录 gemini.google.com 网页的真实 DOM 探测（免费账号旧版 UI）整理：
+依据对已登录 gemini.google.com 网页的真实 DOM 探测（免费账号 UI）整理：
 - 输入框：``div.ql-editor[contenteditable="true"]``（aria-label="为 Gemini 输入提示"）
 - 发送按钮：``button[aria-label="发送"]``（输入后出现）
 - 停止按钮：``button[aria-label="停止回答"]``（生成中出现）
@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
-# Gemini 官方默认入口
+# Gemini 官方默认入口（会话管理器据此定位登录态 profile 与默认 URL）
 GEMINI_APP_URL = "https://gemini.google.com/app"
+SITE_URL = GEMINI_APP_URL
 
-# 免费账号可见的模型列表（旧版 UI；订阅账号会更多，如 3.7 Flash）
+# 免费账号可见的模型列表（订阅账号会更多，如 3.7 Flash）
 SUPPORTED_MODELS: tuple[str, ...] = (
     "3.5 Flash-Lite",
     "3.6 Flash",
@@ -303,13 +304,10 @@ THINKING_ITEM = "扩展思考"
 # 并放开 html/body 的 overflow（html overflow:hidden 会锁死 docH），使整页
 # 高度跟随对话内容增长，从而 full_page 截出含侧边栏的单张真长截图。
 #
-# 旧版曾用 document.querySelector('infinite-scroller') 取滚动容器，会命中
-# 侧边栏第一个 infinite-scroller（.lr26-theme）而非对话区的
-# infinite-scroller.chat-history，导致对话链未被撑开、截图底部空白。
-# 现改为：定位 .conversation-container（消息真实渲染容器）后沿祖先链向上
-# 撑开对话区列（至 bard-sidenav-content 为止）；侧边栏列 bard-sidenav 保持
-# 视口高度（align-self: flex-start 不被拉伸）并铺其原本背景色，使左下角
-# 账号/设置区块始终可见、侧边栏竖条视觉完整。祖先节点
+# 定位 .conversation-container（消息真实渲染容器）后沿祖先链向上撑开对话区列
+# （至 bard-sidenav-content 为止），避免误命中侧边栏的滚动容器；侧边栏列
+# bard-sidenav 保持视口高度（align-self: flex-start 不被拉伸）并铺其原本
+# 背景色，使左下角账号/设置区块始终可见、侧边栏竖条视觉完整。祖先节点
 # （bard-sidenav-container 之上）仅放开 overflow。
 # 返回 { saved, contentH }，saved 为 RESTORE_SCRIPT 兼容的 {path,...} 列表。
 GEMINI_FULLPAGE_EXPAND_SCRIPT = """() => {

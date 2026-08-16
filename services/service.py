@@ -19,10 +19,10 @@ from dataclasses import dataclass, field
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.media_api import get_media_info
 
-from .browser_actions import BrowserActions
-from .browser_session import BrowserSession, get_manager
-from .deepseek_constants import SEARCH_TOGGLE_NAME, THINK_TOGGLE_NAME
-from .gemini_actions import GeminiActions
+from .base.browser_session import BrowserSession, get_manager
+from .deepseek.actions import BrowserActions
+from .deepseek.constants import SEARCH_TOGGLE_NAME, THINK_TOGGLE_NAME
+from .gemini.actions import GeminiActions
 
 logger = get_logger("ai_ui_snapshot.service")
 
@@ -57,7 +57,7 @@ class AskResult:
             capture_snapshot / ask_deepseek(output_format=snapshot) 且截图
             成功时非空）。
         share_url: 分享链接（create_share / ask_deepseek(output_format=
-            share_link，兼容保留) 且成功时非空）。
+            share_link) 且成功时非空）。
         conversation: 当前活跃对话标题（DeepSeek 自动生成，供上层返回给
             LLM 记住对话身份；未取到时为空字符串）。
         model_name: 回复来源标识。
@@ -114,7 +114,7 @@ async def _locate_conversation(
         actions: DeepSeek 页面动作封装。
         session: 当前 stream 的浏览器会话（模式锁容器）。
         conversation: 对话定位方式。
-        new_chat: 旧参数，等价 conversation="__new__"（保留兼容）。
+        new_chat: 等价 conversation="__new__"，两者取其一。
         lock_mode: 进入历史会话后是否锁定其原有模式。
 
     Returns:
@@ -177,7 +177,7 @@ async def ask_deepseek(
     设模式/开关 → （可选）上传 → 提问 → 等待回复 → 按 output_format
     处理 → 读取当前活跃对话标题 → release 解锁。连续对话由同 stream 复用
     同一页面保证；每个对话模式一经选定即锁定，不可切换，换模式须开新对话。
-    output_format 的 share_link 为兼容保留（新代码请用 create_share）。
+    output_format 的 share_link 亦可用 create_share 实现。
 
     Args:
         question: 用户问题（output_format=share_link 时无需提问，可为空）。
@@ -186,7 +186,7 @@ async def ask_deepseek(
         mode: 对话模式（快速模式/专家模式/识图模式，默认快速模式）。
         deepthink: 深度思考开关（True/False/None；默认 True）。
         search: 智能搜索开关（True/False/None；默认 True）。
-        new_chat: 是否先开新对话再提问（旧参数，等价 conversation="__new__"）。
+        new_chat: 是否先开新对话再提问（等价 conversation="__new__"）。
         conversation: 对话定位方式：空（默认）沿用当前对话；精确标题进入
             该历史会话（未命中则新建）；"__new__" 强制新建。
         local_path: 已解析好的上传文件路径（None 表示不上传）。
