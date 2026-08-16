@@ -450,6 +450,18 @@ class PageActions:
         if not self._decoration_enabled:
             return None
         try:
+            # 部分页面启用 TrustedHTML（CSP trusted-types），内联 innerHTML 被拒。
+            # 先注入默认 trustedTypes policy 允许 HTML 赋值，再渲染横幅（无则跳过）。
+            await self._page.evaluate(
+                """() => {
+                    if (window.trustedTypes && window.trustedTypes.createPolicy) {
+                        try {
+                            window.trustedTypes.createPolicy('default', { createHTML: (s) => s });
+                        } catch (e) { /* policy 已存在则忽略 */ }
+                    }
+                    return true;
+                }"""
+            )
             from ..base.chrome_banner import BROWSER_CHROME_SCRIPT
 
             await self._page.evaluate(

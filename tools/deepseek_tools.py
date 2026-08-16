@@ -1,7 +1,7 @@
 """LLM 工具集：DeepSeek 提问 / 历史会话 / 状态查询 / 截图 / 分享链接。
 
 把 DeepSeek 网页操作封装为五个高层工具，bot 通过参数使用，无需逐步操控浏览器：
-- ask_ai_and_snapshot：真实提问，返回回复文本（内部消化转述）。
+- ask_deepseek：真实提问，返回回复文本（内部消化转述）。
 - deepseek_snapshot：直接截取当前/指定对话界面为长截图并发送，不提问。
 - deepseek_share：直接获取当前/指定对话的官方分享链接，不提问。
 - deepseek_history：列出历史会话 / 进入指定会话（返回完整上下文 + 开关状态）。
@@ -36,7 +36,7 @@ logger = get_logger("ai_ui_snapshot.tool")
 class AskAiAndSnapshotTool(_ToolBase):
     """向 DeepSeek 真实提问，返回回复内容供内部消化转述。"""
 
-    name: str = "ask_ai_and_snapshot"
+    name: str = "ask_deepseek"
     description: str = (
         "向 DeepSeek 真实提问，像真人一样使用 DeepSeek，返回回复文本供你自然转述。"
         "可用于：①专业/深奥/复杂问题的转发与思考；②获取实时、不够新的信息"
@@ -244,7 +244,7 @@ class DeepseekHistoryTool(_ToolBase):
         "操作 DeepSeek 的历史会话，像真人翻看之前的对话。"
         "action=list 列出侧边栏的历史会话标题；action=open 需提供 title 进入该会话，"
         "进入后工具会返回该会话的完整上下文与当前开关状态，之后可用 "
-        "ask_ai_and_snapshot 继续在这个会话里对话。"
+        "ask_deepseek 继续在这个会话里对话。"
     )
 
     async def execute(
@@ -292,7 +292,7 @@ class DeepseekHistoryTool(_ToolBase):
                 "locked_mode": mode or "未知",
                 "conversation": current_title or title,
                 "context": context,
-                "tip": "已进入该会话（模式已锁定，不可切换），可用 ask_ai_and_snapshot 继续对话。conversation 字段为当前对话标题，后续追问可传同一标题。",
+                "tip": "已进入该会话（模式已锁定，不可切换），可用 ask_deepseek 继续对话。conversation 字段为当前对话标题，后续追问可传同一标题。",
             }
         return False, f"未知操作: {action}（可选 list/open）"
 

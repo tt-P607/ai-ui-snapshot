@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol, runtime_checkable
+
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseTool
 
@@ -13,6 +15,13 @@ from ..services.base.browser_session import get_manager
 from ..services.deepseek.actions import BrowserActions
 
 logger = get_logger("ai_ui_snapshot.tool_base")
+
+
+@runtime_checkable
+class _DownloadedFileResolver(Protocol):
+    """media_retriever Service 已下载文件解析能力的形状声明。"""
+
+    def resolve_downloaded_file(self, stream_id: str, file_name: str) -> str | None: ...
 
 
 class _ToolBase(BaseTool):
@@ -54,13 +63,10 @@ class _ToolBase(BaseTool):
             from src.app.plugin_system.api.service_api import get_service
 
             service = get_service("media_retriever:service:media_retriever")
-            if service is None:
-                logger.warning("未找到 media_retriever Service，无法解析已下载文件")
+            if not isinstance(service, _DownloadedFileResolver):
+                logger.warning("未找到 media_retriever 已下载文件解析能力")
                 return None
-            resolve = getattr(service, "resolve_downloaded_file", None)
-            if not callable(resolve):
-                return None
-            result = resolve(stream_id, file_name)
+            result = service.resolve_downloaded_file(stream_id, file_name)
             return str(result) if result else None
         except Exception as exc:  # noqa: BLE001 - 服务不可用时降级
             logger.warning(f"解析 media_retriever 已下载文件失败: {exc}")

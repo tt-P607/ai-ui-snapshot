@@ -29,7 +29,7 @@ BROWSER_CHROME_SCRIPT = """(payload) => {
             dark = true;
         } else {
             const bg = (getComputedStyle(document.body).backgroundColor || getComputedStyle(document.documentElement).backgroundColor || '');
-            const m = bg.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+            const m = bg.match(/rgba?\\(\s*(\\d+)\s*,\s*(\\d+)\s*,\s*(\\d+)/);
             if (m && (+m[1] !== 0 || +m[2] !== 0 || +m[3] !== 0)) {
                 const lum = 0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3];
                 dark = lum < 128;

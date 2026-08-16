@@ -2,7 +2,7 @@
 
 提供 `ai_ui_snapshot` 插件：让 Bot 像真人一样使用 DeepSeek 与 Gemini。
 插件用任务级临时 Playwright 浏览器（复用 bot 账号登录态）驱动真实网页，
-通过封装好的高层工具（DeepSeek：ask_ai_and_snapshot / deepseek_snapshot /
+通过封装好的高层工具（DeepSeek：ask_deepseek / deepseek_snapshot /
 deepseek_share / deepseek_history / deepseek_state；Gemini：ask_gemini_ai /
 gemini_generate_image / gemini_share）操作，无需逐步操控浏览器。
 """
