@@ -17,6 +17,7 @@ from .commands.ask_command import AiSnapshotCommand
 from .services.base import browser_session
 from .tools.deepseek_tools import DEEPSEEK_TOOLS
 from .tools.gemini_tools import GEMINI_TOOLS
+from .tools.recovery_tool import RECOVERY_TOOLS
 
 logger = log_api.get_logger("ai_ui_snapshot")
 
@@ -72,10 +73,13 @@ class AiUiSnapshotPlugin(BasePlugin):
         if isinstance(config, AiUiSnapshotConfig) and not config.plugin.enabled:
             return []
         if not isinstance(config, AiUiSnapshotConfig):
-            return [*DEEPSEEK_TOOLS, *GEMINI_TOOLS, AiSnapshotCommand]
+            return [*DEEPSEEK_TOOLS, *GEMINI_TOOLS, *RECOVERY_TOOLS, AiSnapshotCommand]
         components: list[type] = []
         if config.sites.deepseek:
             components.extend([*DEEPSEEK_TOOLS, AiSnapshotCommand])
         if config.sites.gemini:
             components.extend(GEMINI_TOOLS)
+        # 恢复工具随任一站点启用注册（可重置任意站点，故独立于站点开关）
+        if config.sites.deepseek or config.sites.gemini:
+            components.extend(RECOVERY_TOOLS)
         return components

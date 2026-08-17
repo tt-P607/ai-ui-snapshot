@@ -24,6 +24,7 @@
 ### 通用
 
 - **快捷命令**（`/ask`）：显式驱动真实 DeepSeek/Gemini 网页提问并截图（`-g` 切换 Gemini）。
+- **会话重置**（`reset_browser`）：网页会话卡死、页面崩溃或无响应时，关闭并重建指定站点（`site` 参数：`deepseek` / `gemini`）的浏览器会话；相当于关掉浏览器重开进主页，登录态与云端历史对话都保留，可照常继续。
 - **对话定位**（`conversation` 参数）：空沿用当前对话、精确标题进入历史会话（未命中则新建）、`__new__` 强制新建。
 - **长截图**：完整对话长图，思考块默认收起，超长自动分片；截图顶部叠加 1:1 Chromium 矢量浏览器外壳（含动态对话标题、明暗主题自适应、真实 Google 账号头像）。
 - **附带文件**：图片（media_id）或已下载文件一起提问。
@@ -78,6 +79,7 @@ uv run python scripts/verify_gemini_screenshot.py     # Gemini 截图验证
 
 工具（DeepSeek）：`ask_deepseek` / `deepseek_snapshot` / `deepseek_share` / `deepseek_history` / `deepseek_state`
 工具（Gemini）：`ask_gemini_ai` / `gemini_generate_image` / `gemini_snapshot` / `gemini_share`
+工具（通用）：`reset_browser`（卡死/崩溃恢复）
 
 ## 截图行为验证
 
