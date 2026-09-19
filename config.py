@@ -19,6 +19,7 @@ class AiUiSnapshotConfig(BaseConfig):
     """AI UI 仿真截图插件配置。"""
 
     name: ClassVar[str] = "config"
+    config_name: ClassVar[str] = "config"
     description: ClassVar[str] = "AI UI 仿真截图插件配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")

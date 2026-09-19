@@ -36,7 +36,7 @@ class AiUiSnapshotPlugin(BasePlugin):
 
     plugin_name: str = "ai_ui_snapshot"
 
-    configs: list[type] = [AiUiSnapshotConfig]
+    configs = [AiUiSnapshotConfig]
 
     dependent_components: list[str] = []
 

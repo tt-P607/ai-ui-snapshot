@@ -23,20 +23,22 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py    # 登�
 
 ## 验证功能
 
-```bash
-uv run python plugins/ai_ui_snapshot/scripts/verify_conversation_switch.py      # 会话进入和模型匹配，不用联网
-uv run python plugins/ai_ui_snapshot/scripts/verify_recognize.py --no-site      # 识图接管契约，全本地
-uv run python plugins/ai_ui_snapshot/scripts/verify_recognize.py                # 识图真实链路，联网
-uv run python plugins/ai_ui_snapshot/scripts/verify_real_conversation_switch.py # 真站点会话切换，联网
-```
-
-截图类的有 `verify_deepseek_screenshot.py`、`verify_gemini_screenshot.py`（可以加 `--short`）、`verify_doubao_screenshot.py`、`verify_doubao_full.py`、`verify_doubao_media.py`、`verify_doubao_attachment.py`。
-
-## 排查站点改版
-
-站点换了页面结构、选择器失效时用这些，它们会把页面结构 dump 出来对照：
-
-`probe_doubao_dom*.py`、`probe_doubao_skill.py`、`probe_doubao_upload*.py`、`probe_doubao_imgdiag.py`、`diag_doubao_ready.py`、`diag_doubao_attach.py`
+- **基础与契约验证**：
+  ```bash
+  uv run python plugins/ai_ui_snapshot/scripts/verify_conversation_switch.py      # 会话进入和模型匹配，不用联网
+  uv run python plugins/ai_ui_snapshot/scripts/verify_recognize.py --no-site      # 识图接管契约，全本地
+  uv run python plugins/ai_ui_snapshot/scripts/verify_recognize.py                # 识图真实链路，联网
+  uv run python plugins/ai_ui_snapshot/scripts/verify_real_conversation_switch.py # 真站点会话切换，联网
+  ```
+- **站点功能与截图验证**：
+  ```bash
+  uv run python plugins/ai_ui_snapshot/scripts/verify_deepseek_screenshot.py      # DeepSeek 提问与截图
+  uv run python plugins/ai_ui_snapshot/scripts/verify_gemini_screenshot.py        # Gemini 截图（支持 --short）
+  uv run python plugins/ai_ui_snapshot/scripts/verify_doubao_screenshot.py        # 豆包截图冒烟
+  uv run python plugins/ai_ui_snapshot/scripts/verify_doubao_full.py              # 豆包全量交互验证
+  uv run python plugins/ai_ui_snapshot/scripts/verify_doubao_media.py             # 豆包生图/生视频验证
+  uv run python plugins/ai_ui_snapshot/scripts/verify_doubao_attachment.py        # 豆包附件全流程验证
+  ```
 
 ## 注意
 

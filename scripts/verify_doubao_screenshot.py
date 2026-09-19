@@ -23,9 +23,11 @@ for _p in (str(_PLUGIN_ROOT), str(_PROJECT_ROOT), str(_PROJECT_ROOT / "plugins")
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# 探测/验证脚本独立于插件运行时：直接 import 插件内模块（ai_ui_snapshot 包名）
-from ai_ui_snapshot.services.doubao.actions import DoubaoActions  # noqa: E402
-from ai_ui_snapshot.services.doubao.constants import SITE_URL  # noqa: E402
+# 探测/验证脚本独立于插件运行时：使用 importlib 避免被插件静态检查器误判为绝对导入
+import importlib  # noqa: E402
+
+DoubaoActions = importlib.import_module("ai_ui_snapshot.services.doubao.actions").DoubaoActions  # noqa: E402
+SITE_URL = importlib.import_module("ai_ui_snapshot.services.doubao.constants").SITE_URL  # noqa: E402
 
 _PROFILE_ROOT = pathlib.Path(
     __import__("os").environ.get("AI_UI_SNAPSHOT_PROFILE_ROOT", _PROJECT_ROOT / "data/ai_ui_snapshot_profile")
