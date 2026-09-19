@@ -4,6 +4,9 @@
   "version": "1.12.0",
   "description": "拟人化使用 DeepSeek、Gemini 与豆包插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini/豆包网页，通过封装好的高层工具（DeepSeek：一键提问 ask_deepseek、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state；Gemini：提问 ask_gemini_ai、生图 gemini_generate_image、截图 gemini_snapshot、分享 gemini_share；豆包：提问 ask_doubao、截图 doubao_snapshot、历史会话 doubao_history、状态查询 doubao_state、生图 doubao_generate_image、生视频 doubao_generate_video、发送视频 doubao_send_video）让 bot 像真人一样使用主流 AI 网页，支持模型/开关/全模态附件/长截图/分享链接/图片生成/视频生成，UI 完全真实；并可接管框架的图片识别（用真实网页给图片生成描述）",
   "author": "言柒",
+  "maintainers": [
+    "github:tt-P607"
+  ],
   "license": "AGPL-3.0",
   "homepage": "https://github.com/tt-P607/ai-ui-snapshot",
   "github_owner": "tt-P607",
