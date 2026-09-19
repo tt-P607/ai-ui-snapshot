@@ -18,6 +18,7 @@ from __future__ import annotations
 from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseCommand, cmd_route
+from src.app.plugin_system.types import PermissionLevel
 
 from ..config import AiUiSnapshotConfig
 from ..services.service import (
@@ -114,12 +115,13 @@ def _parse_ask_flags(text: str) -> tuple[str, str, str, bool | None, bool | None
 
 
 class AiSnapshotCommand(BaseCommand):
-    """AI 界面截图快捷命令。"""
+    """AI 界面截图快捷命令（默认仅 Bot 所有者可用）。"""
 
     name: str = "ask"
     description: str = (
         "在真实 AI 网页提问并截图对话区发送：/ask [-g] [-db] [-m 模型] [-d] [-s] <问题>"
     )
+    permission_level: PermissionLevel = PermissionLevel.OWNER
 
     @cmd_route()
     async def handle_ask(self, question: str) -> tuple[bool, str]:

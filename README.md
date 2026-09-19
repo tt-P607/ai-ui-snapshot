@@ -150,7 +150,7 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 
 ### 聊天命令 `/ask`
 
-用户可在聊天窗口直接向网页提问并获取仿真截图，方便快速测试与日常查看：
+用于直接向网页提问并获取仿真截图。**默认仅限 Bot 所有者（OWNER）使用**，防止被群内普通成员频繁调用：
 
 ```text
 /ask 为什么天空是蓝色的                  # 默认通过 DeepSeek 提问并截取长图
