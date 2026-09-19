@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Protocol, runtime_checkable
 
 from src.app.plugin_system.api.log_api import get_logger
@@ -71,3 +72,41 @@ class _ToolBase(BaseTool):
         except Exception as exc:  # noqa: BLE001 - 服务不可用时降级
             logger.warning(f"解析 media_retriever 已下载文件失败: {exc}")
             return None
+
+    @staticmethod
+    def _split_media_ids(raw_ids: str) -> list[str]:
+        """拆分 media_id 串（支持英文/中文逗号、顿号、空白分隔）。
+
+        Args:
+            raw_ids: 一个或多个 media_id 组成的字符串。
+
+        Returns:
+            list[str]: 去重后的 media_id 列表（保持原顺序）。
+        """
+        parts = [p.strip() for p in re.split(r"[,，、\s]+", raw_ids or "") if p.strip()]
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for part in parts:
+            if part not in seen:
+                seen.add(part)
+                ordered.append(part)
+        return ordered
+
+    async def _resolve_media_ids(self, raw_ids: str) -> tuple[list[str], str]:
+        """把 media_id 串（可含多个）解析为本地文件路径列表。
+
+        Args:
+            raw_ids: 一个或多个 media_id（逗号/顿号/空格分隔）。
+
+        Returns:
+            tuple[list[str], str]: (本地路径列表, 错误信息或空字符串)。
+        """
+        from ..services.service import resolve_media_path
+
+        paths: list[str] = []
+        for media_id in self._split_media_ids(raw_ids):
+            path = await resolve_media_path(media_id)
+            if not path:
+                return [], f"无法解析媒体 media_id: {media_id}"
+            paths.append(path)
+        return paths, ""

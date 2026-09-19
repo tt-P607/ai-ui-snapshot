@@ -34,6 +34,7 @@ class PageActions:
         conversation_text_script: 对话文本提取脚本（站点差异，子类覆盖）。
         active_title_script: 活跃会话标题提取脚本（站点差异，子类覆盖）。
         active_id_script: 活跃会话稳定 ID 提取脚本（站点差异，子类覆盖）。
+        fingerprint_script: 会话切换指纹脚本（站点差异，子类覆盖；可选）。
     """
 
     conversation_selector: str = ""
@@ -43,6 +44,10 @@ class PageActions:
     conversation_text_script: str = ""
     active_title_script: str = ""
     active_id_script: str = ""
+    fingerprint_script: str = ""
+    # 站点风控拦截提示检测脚本（站点差异，子类覆盖）：返回拦截提示文本，
+    # 无拦截返回空字符串。站点无人机校验时留空即不检测。
+    blocker_script: str = ""
 
     def __init__(
         self,
@@ -70,11 +75,31 @@ class PageActions:
         self._decoration_enabled = decoration_enabled
         self._decoration_theme = decoration_theme
         self._decoration_avatar_url = decoration_avatar_url
+        self.last_blocker: str = ""
 
     @property
     def page(self) -> Any:
         """当前页面对象。"""
         return self._page
+
+    async def check_blocker(self) -> str:
+        """检测站点风控拦截（人机验证等），命中时记录供上层给出明确提示。
+
+        站点触发人机校验时会弹出无法自动完成的验证层，此时继续轮询只会
+        等到超时并给出模糊错误；提前识别可立即中断并告知人工介入。
+
+        Returns:
+            str: 拦截提示文本；无拦截或站点未配置检测脚本时为空字符串。
+        """
+        if not self.blocker_script:
+            return ""
+        try:
+            hint = str(await self._page.evaluate(self.blocker_script) or "")
+        except Exception:  # noqa: BLE001 - 页面未就绪
+            return ""
+        if hint:
+            self.last_blocker = hint
+        return hint
 
     # ------------------------------------------------------------------
     # 通用细粒度页面操作
@@ -225,24 +250,56 @@ class PageActions:
         except Exception:  # noqa: BLE001
             return False
 
+    async def page_allowed_extensions(self) -> set[str]:
+        """读取网页文件输入的 accept 扩展名集合（以网页为白名单来源）。
+
+        站点自己维护可用类型且会随时扩充，插件内手写白名单必然滞后；直接读
+        网页声明的 accept 可与之保持一致。
+
+        Returns:
+            set[str]: 扩展名集合（小写、不含点）；网页未逐个声明时返回空集合。
+        """
+        try:
+            raw = str(
+                await self._page.evaluate(
+                    """() => {
+                        for (const f of document.querySelectorAll('input[type=file]')) {
+                            if (f.accept) return f.accept;
+                        }
+                        return '';
+                    }"""
+                )
+                or ""
+            )
+        except Exception:  # noqa: BLE001 - 页面未就绪
+            return set()
+        exts: set[str] = set()
+        for token in raw.split(","):
+            token = token.strip().lower()
+            if token.startswith("."):
+                exts.add(token.lstrip("."))
+        return exts
+
     async def upload_file(
         self,
         path: str,
         *,
         max_size_mb: float = 10.0,
-        allowed_extensions: str = "png,jpg,jpeg,webp,gif,bmp,md,txt,pdf,doc,docx,xls,xlsx,csv,ppt,pptx,json,py",
+        allowed_extensions: str | None = None,
         attach_timeout_s: float = 15.0,
     ) -> tuple[bool, str]:
         """上传本地文件到当前网页（通过隐藏的 file input）。
 
         上传前校验扩展名与大小，避免把网页不支持的内容塞给输入框。
         网页上传为异步：``set_input_files`` 后轮询输入区内出现附件预览
-        （图片显示为 img、文档显示为文件名+大小），确认附件挂载完成再返回。
+        （图片显示为 img、文档显示为文件名+大小），确认附件挂载完成再返回；
+        网页拒绝该文件时预览不会出现，此时返回失败（而非静默当作成功）。
 
         Args:
             path: 本地文件路径。
             max_size_mb: 允许的最大大小（MB）。
-            allowed_extensions: 允许的扩展名（逗号分隔，小写）。
+            allowed_extensions: 允许的扩展名（逗号分隔，小写）；None 时按
+                网页 accept 声明校验（以站点为准）。
             attach_timeout_s: 等待附件渲染的超时秒数。
 
         Returns:
@@ -250,9 +307,18 @@ class PageActions:
         """
         page = self._page
         suffix = pathlib.Path(path).suffix.lower().lstrip(".")
-        allowed = {e.strip().lower().lstrip(".") for e in allowed_extensions.split(",") if e.strip()}
+        if allowed_extensions is None:
+            allowed = await self.page_allowed_extensions()
+        else:
+            allowed = {
+                e.strip().lower().lstrip(".") for e in allowed_extensions.split(",") if e.strip()
+            }
         if allowed and suffix not in allowed:
-            return False, f"文件类型 .{suffix} 不在允许范围（{', '.join(sorted(allowed))}）"
+            # 网页可接受类型可达数百种，全量列出无意义，仅给出数量
+            supported = ", ".join(sorted(allowed))
+            if len(allowed) > 20:
+                supported = f"网页共支持 {len(allowed)} 种"
+            return False, f"文件类型 .{suffix} 不在允许范围（{supported}）"
         try:
             if pathlib.Path(path).stat().st_size > max_size_mb * 1024 * 1024:
                 return False, f"文件大小超过限制 {max_size_mb:g}MB"
@@ -294,7 +360,9 @@ class PageActions:
         if attached:
             await page.wait_for_timeout(800)
             return True, f"已上传并等待附件就绪: {path}"
-        return True, f"已上传（附件检测超时，可能上传较慢）: {path}"
+        # 网页拒绝该文件时输入区不会出现附件预览，必须报失败：
+        # 否则提问会在无附件的情况下发出，得到与预期不符的回复。
+        return False, f"上传失败（网页未接受该附件，可能类型或大小不支持）: {path}"
 
     # ------------------------------------------------------------------
     # 站点共享会话动作（站点脚本经类属性注入）
@@ -310,9 +378,9 @@ class PageActions:
     async def wait_reply_done(self, timeout_s: int = 240) -> tuple[bool, str]:
         """轮询等待 AI 回复完成，并返回干净的最新一条 AI 回复。
 
-        以生成中指示器（"停止生成/停止回答"按钮）作强信号：只要仍在生成绝不判
-        完成；指示器消失后叠加"最新回复长度连续稳定"兜底判定。轮询期间调用保活
-        回调刷新会话活动时间，避免长等待被空闲清理。返回正文不含思考块。
+        以生成中指示器（站点自定：停止按钮/停止文案）作强信号：只要仍在生成绝不
+        判完成；指示器消失后叠加"最新回复长度连续稳定"兜底判定。轮询期间调用
+        保活回调刷新会话活动时间，避免长等待被空闲清理。返回正文不含思考块。
 
         Args:
             timeout_s: 超时秒数。
@@ -336,6 +404,9 @@ class PageActions:
             except Exception:  # noqa: BLE001 - 页面未就绪
                 generating = False
                 text = ""
+            if await self.check_blocker():
+                # 站点弹了人机验证：提问无法继续，立即中断等待
+                return False, text
             if generating:
                 # 仍在生成：重置稳定计数，绝不提前判完成
                 stable = 0
@@ -347,7 +418,9 @@ class PageActions:
                 stable = 0
             else:
                 stable += 1
-            if stable >= 4 and last_len > 10:
+            # last_len > 0 保证正文已开始输出（未开始时取不到正文）；
+            # 不用更大阈值，否则一句话级别的短回复会被误判为超时。
+            if stable >= 4 and last_len > 0:
                 return True, text
             await asyncio.sleep(self.poll_interval_s)
         return False, text
@@ -405,31 +478,61 @@ class PageActions:
         except Exception:  # noqa: BLE001 - 页面未就绪
             return ""
 
-    @staticmethod
-    def _resolve_avatar_url(avatar_url: str) -> str:
-        """解析头像 URL，若为空则尝试自动加载已持久化的真实 Google 头像。
+    async def _wait_session_switch(
+        self,
+        *,
+        target_id: str = "",
+        target_title: str = "",
+        before_fingerprint: str = "",
+        timeout_s: float = 3.0,
+        interval_s: float = 0.25,
+    ) -> bool:
+        """等待会话切换到目标（仅用于观察切换是否生效）。
+
+        三个判据任一命中即视为已确认：活跃会话 ID 等于目标 ID、活跃标题等于
+        目标标题、会话指纹与切换前不同。先立即探测一次（已在目标会话或页面
+        已即时更新时秒回），再按 interval_s 轮询至超时。
+
+        侧边栏点击是前端路由跳转，实测三站点 URL/标题均在 0.5 秒内更新
+        （gemini 0.06s / doubao 0.31s / deepseek 0.05s），故超时只需留足
+        余量；未命中时只多花这么点时间。
 
         Args:
-            avatar_url: 配置或传入的头像地址。
+            target_id: 目标会话稳定 ID（为空时跳过该判据）。
+            target_title: 目标会话标题（为空时跳过该判据）。
+            before_fingerprint: 切换前会话指纹（站点未配置指纹脚本时忽略）。
+            timeout_s: 轮询超时秒数。
+            interval_s: 轮询间隔秒数。
 
         Returns:
-            str: 头像 URL 或包含真实头像数据的 base64 data URI。
+            bool: 是否观测到切换生效；超时未观测到时返回 False。
         """
-        if avatar_url:
-            return avatar_url
-        candidate_paths = [
-            pathlib.Path("data/ai_ui_snapshot_profile/gemini/google_avatar.png"),
-            pathlib.Path("data/ai_ui_snapshot_profile/deepseek/google_avatar.png"),
-        ]
-        for p in candidate_paths:
-            if p.is_file():
-                try:
-                    data = p.read_bytes()
-                    if data:
-                        return data_uri(data)
-                except Exception:  # noqa: BLE001
-                    pass
-        return ""
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            if target_id and (await self.get_active_conversation_id()) == target_id:
+                return True
+            if target_title and (await self.get_active_conversation_title()) == target_title:
+                return True
+            if before_fingerprint and self.fingerprint_script:
+                now = str(await self._page.evaluate(self.fingerprint_script) or "")
+                if now != before_fingerprint:
+                    return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(interval_s)
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            if target_id and (await self.get_active_conversation_id()) == target_id:
+                return True
+            if target_title and (await self.get_active_conversation_title()) == target_title:
+                return True
+            if before_fingerprint and self.fingerprint_script:
+                now = str(await self._page.evaluate(self.fingerprint_script) or "")
+                if now != before_fingerprint:
+                    return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
     # 浏览器外壳装饰（站点无关：Chrome 顶栏横幅）
@@ -469,7 +572,7 @@ class PageActions:
                 {
                     "width": width,
                     "theme": self._decoration_theme,
-                    "avatar_url": self._resolve_avatar_url(self._decoration_avatar_url),
+                    "avatar_url": self._decoration_avatar_url,
                 },
             )
             locator = self._page.locator("#mofox_chrome_banner")

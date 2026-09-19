@@ -1,8 +1,8 @@
 {
   "name": "ai_ui_snapshot",
   "display_name": "AI UI Snapshot",
-  "version": "1.8.1",
-  "description": "拟人化使用 DeepSeek 与 Gemini 插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini 网页，通过封装好的高层工具（DeepSeek：一键提问 ask_deepseek、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state；Gemini：提问 ask_gemini_ai、生图 gemini_generate_image、截图 gemini_snapshot、分享 gemini_share）让 bot 像真人一样使用两大 AI 网页，支持模式/开关/全模态附件/长截图/分享链接，UI 完全真实",
+  "version": "1.12.0",
+  "description": "拟人化使用 DeepSeek、Gemini 与豆包插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini/豆包网页，通过封装好的高层工具（DeepSeek：一键提问 ask_deepseek、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state；Gemini：提问 ask_gemini_ai、生图 gemini_generate_image、截图 gemini_snapshot、分享 gemini_share；豆包：提问 ask_doubao、截图 doubao_snapshot、历史会话 doubao_history、状态查询 doubao_state、生图 doubao_generate_image、生视频 doubao_generate_video、发送视频 doubao_send_video）让 bot 像真人一样使用主流 AI 网页，支持模型/开关/全模态附件/长截图/分享链接/图片生成/视频生成，UI 完全真实；并可接管框架的图片识别（用真实网页给图片生成描述）",
   "author": "MoFox Studio",
   "license": "GPL-3.0",
   "homepage": "",
@@ -14,6 +14,7 @@
     "screenshot",
     "deepseek",
     "gemini",
+    "doubao",
     "persona",
     "browser"
   ],
@@ -22,6 +23,7 @@
     "UI",
     "DeepSeek",
     "Gemini",
+    "豆包",
     "拟人",
     "浏览器"
   ],
@@ -36,6 +38,7 @@
     "log_api": "1.0.0",
     "send_api": "1.0.0",
     "media_api": "1.0.0",
+    "event_api": "1.1.0",
     "service_api": "1.0.0"
   },
   "dependencies_required": false,
@@ -43,19 +46,19 @@
     {
       "component_type": "tool",
       "component_name": "ask_deepseek",
-      "description": "向 DeepSeek 真实提问并返回回复文本（内部消化转述）；支持模式/深度思考/联网搜索/附带图片或文件/信息返回范围",
+      "description": "向 DeepSeek 真实提问并返回回复文本（内部消化转述）；支持深度思考/智能搜索/附带图片或文件/信息返回范围",
       "dependencies": []
     },
     {
       "component_type": "tool",
       "component_name": "deepseek_snapshot",
-      "description": "直接截取当前/指定 DeepSeek 对话界面为长截图并发送，不提问、不改模式",
+      "description": "直接截取当前/指定 DeepSeek 对话界面为长截图并发送，不提问",
       "dependencies": []
     },
     {
       "component_type": "tool",
       "component_name": "deepseek_share",
-      "description": "直接获取当前/指定 DeepSeek 对话的官方公开分享链接，不提问、不改模式",
+      "description": "直接获取当前/指定 DeepSeek 对话的官方公开分享链接，不提问",
       "dependencies": []
     },
     {
@@ -67,7 +70,7 @@
     {
       "component_type": "tool",
       "component_name": "deepseek_state",
-      "description": "查询当前 DeepSeek 对话模式与深度思考/联网搜索开关状态",
+      "description": "查询当前 DeepSeek 对话标题与深度思考/智能搜索开关状态",
       "dependencies": []
     },
     {
@@ -96,14 +99,62 @@
     },
     {
       "component_type": "tool",
+      "component_name": "ask_doubao",
+      "description": "向豆包真实提问并返回回复文本（内部消化转述）；支持深度思考/联网搜索/附带图片或文件/信息返回范围",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_snapshot",
+      "description": "直接截取当前/指定豆包对话界面为长截图并发送，不提问、不改设置",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_history",
+      "description": "列出豆包历史会话，或进入指定会话并返回完整上下文与开关状态，供继续对话",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_state",
+      "description": "查询当前豆包对话深度思考/联网搜索开关状态",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_generate_image",
+      "description": "用豆包图像生成能力生图并自动发送（中文语境/创意插画优势，同步等待约 1 分钟）",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_generate_video",
+      "description": "提交豆包视频生成任务（约 2 分钟，含参数自动确认，后台等待，完成后系统唤醒 bot 决策是否发送）",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_send_video",
+      "description": "发送已生成完成的豆包视频文件到当前聊天（配合 doubao_generate_video 的完成通知）",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
       "component_name": "reset_browser",
-      "description": "关闭并重建指定站点（deepseek/gemini）的浏览器会话，用于卡死/崩溃/无响应等异常恢复；登录态与历史对话保留",
+      "description": "关闭并重建指定站点（deepseek/gemini/doubao）的浏览器会话，用于卡死/崩溃/无响应等异常恢复；登录态与历史对话保留",
       "dependencies": []
     },
     {
       "component_type": "command",
       "component_name": "ai_snapshot_command",
-      "description": "/ask <问题> 命令，显式驱动真实 DeepSeek/Gemini 网页提问并截图",
+      "description": "/ask <问题> 命令，显式驱动真实 DeepSeek/Gemini/豆包网页提问并截图",
+      "dependencies": []
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "media_recognize",
+      "description": "接管框架图片/表情包识别：用真实 DeepSeek/豆包/Gemini 网页识图并回填描述，失败自动交回框架内置 VLM",
       "dependencies": []
     }
   ],

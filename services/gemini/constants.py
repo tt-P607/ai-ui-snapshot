@@ -18,12 +18,13 @@ from __future__ import annotations
 GEMINI_APP_URL = "https://gemini.google.com/app"
 SITE_URL = GEMINI_APP_URL
 
-# 免费账号可见的模型列表（订阅账号会更多，如 3.7 Flash）
+# 可选模型家族关键词（按关键词匹配菜单项，自动落到网页当前版本，不随版本号
+# 更新失效；同家族多版本并存时取版本号最高项）。"扩展思考" 为独立开关，
+# 用 set_thinking 控制，不在此列。
 SUPPORTED_MODELS: tuple[str, ...] = (
-    "3.5 Flash-Lite",
-    "3.6 Flash",
-    "3.1 Pro",
-    "扩展思考",
+    "Flash-Lite",
+    "Flash",
+    "Pro",
 )
 
 # 输入框选择器（contenteditable 富文本框）
@@ -45,7 +46,7 @@ STOP_BUTTON_SELECTOR = (
 MODE_SELECTOR_BUTTON = "button[aria-label*='打开模式选择器'], .input-area-switch"
 
 # 模型菜单项（打开模式选择器后出现）
-MODEL_MENU_ITEM_SELECTOR = "[role='menuitem']"
+MODEL_MENU_ITEM_SELECTOR = "[role='menuitem'], [role='menuitemradio']"
 
 # 用户消息容器与正文
 USER_QUERY_SELECTOR = ".user-query-container"
@@ -59,6 +60,40 @@ MODEL_MARKDOWN_SELECTOR = ".markdown.markdown-main-panel"
 
 # 对话内容容器选择器（撑开长截图时定位）
 CONVERSATION_SELECTOR = "main.chat-app, main[class*='chat-app'], main"
+
+# 登录态就绪判定脚本（登录脚本与运行时共用，参数为输入框选择器）：
+# 输入框可见 + 无"登录"按钮 + 存在 Google 账号按钮（已登录才渲染）。
+READY_CHECK_SCRIPT = """(input_sel) => {
+    const editor = document.querySelector(input_sel);
+    if (!editor) return false;
+    const r = editor.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
+    const loginBtn = btns.some(el => {
+        const t = (el.innerText || '').trim();
+        return t === '登录' || t === 'Sign in';
+    });
+    const accountBtn = btns.some(el => {
+        const a = el.getAttribute('aria-label') || '';
+        return a.includes('Google 账号') || a.includes('Google account');
+    });
+    return !loginBtn && accountBtn;
+}"""
+
+# Google 账号按钮文案提取（已登录时存在；aria-label 形如
+# "Google 账号：<邮箱>（<名字>）"，用做"账号是否变了"的判据）
+ACCOUNT_LABEL_SCRIPT = """() => {
+    const el = document.querySelector('[aria-label*="Google 账号"], [aria-label*="Google account"]');
+    return el ? (el.getAttribute('aria-label') || '').trim() : '';
+}"""
+
+# 打开右上角 Google 账号菜单（换账号时供用户直接点"添加账号"/"退出"）
+ACCOUNT_MENU_SCRIPT = """() => {
+    const el = document.querySelector('[aria-label*="Google 账号"], [aria-label*="Google account"]');
+    if (!el) return false;
+    el.click();
+    return true;
+}"""
 
 # 文件上传：Gemini 输入区旁"上传和工具"按钮（打开文件选择器后存在隐藏 input[type=file]）
 UPLOAD_BUTTON_SELECTOR = "button[aria-label='上传和工具'], button[aria-label*='上传']"
@@ -111,19 +146,17 @@ SHARE_LINK_READY_SCRIPT = """() => {
     return a ? (a.getAttribute('href') || a.href || '') : '';
 }"""
 
-# 侧边栏历史会话项（mat-mdc-list-item，标题为 innerText 首行；选中项含 is-active）
-HISTORY_ITEM_SELECTOR = (
-    "mat-nav-list mat-mdc-list-item a, [class*='gem-nav-list-item'] a"
-    ", [class*='sidenav-with-history-container'] a"
-)
-# 当前活跃会话标题提取（选中项 aria-current="page" 或 class 含 is-active）
+# 当前活跃会话标题提取（选中项 aria-current="page" 或 class 含 is-active）。
+# 侧边栏固定操作项（发起新对话/搜索/库/笔记本等）在首页也会带选中标记，
+# 必须跳过它们，否则会把入口名当成会话标题返回。
 ACTIVE_CONVERSATION_TITLE_SCRIPT = """() => {
-    const el = document.querySelector(
+    const skip = new Set(['发起新对话', '搜索对话内容', '库', '笔记本', '新建笔记本', '最近', 'Gemini', '设置和帮助', '帮助']);
+    const nodes = document.querySelectorAll(
         '[class*="mat-mdc-list-item"].is-active, [class*="mat-mdc-list-item"][aria-current="page"], [aria-current="page"]'
     );
-    if (el) {
+    for (const el of nodes) {
         const t = (el.innerText || '').split(/\\r?\\n/)[0].trim();
-        if (t) return t;
+        if (t && !skip.has(t)) return t;
     }
     return '';
 }"""
@@ -149,19 +182,22 @@ HISTORY_LIST_SCRIPT = """() => {
     }
     return out.slice(0, 50);
 }"""
-# 打开指定标题的历史会话（在侧边栏按文本匹配并点击，返回是否命中）
+# 打开指定标题的历史会话（在侧边栏按文本匹配并点击）。
+# 返回 {ok, id}：id 为目标项 href 中的会话 ID（/app/<id>），供调用方校验
+# 切换确实生效；href 无 ID 时返回空串，调用方回退指纹判据。
 HISTORY_OPEN_SCRIPT = """(title) => {
     const norm = (s) => (s || '').trim().replace(/\\s+/g, ' ').replace(/\\n+/g, ' ');
     const want = norm(title);
-    if (!want) return false;
+    if (!want) return {ok: false, id: ''};
     const links = Array.from(document.querySelectorAll("mat-nav-list mat-mdc-list-item a, [class*='gem-nav-list-item'] a, [class*='sidenav-with-history-container'] a"));
     let pick = null;
     pick = links.find(a => norm(a.innerText) === want) || null;
     if (!pick) pick = links.find(a => norm(a.innerText).startsWith(want)) || null;
     if (!pick) pick = links.find(a => norm(a.innerText).includes(want)) || null;
-    if (!pick) return false;
+    if (!pick) return {ok: false, id: ''};
+    const m = (pick.getAttribute('href') || '').match(/\\/app\\/([0-9a-f]+)/i);
     pick.click();
-    return true;
+    return {ok: true, id: m ? m[1].toLowerCase() : ''};
 }"""
 # 新对话入口（点击"发起新对话"）
 NEW_CHAT_SCRIPT = """() => {
@@ -244,15 +280,23 @@ OPEN_MODEL_MENU_SCRIPT = """() => {
     return true;
 }"""
 
-# 选择指定模型：在菜单项中按文本匹配并点击（返回是否命中可点项）。
-SET_MODEL_SCRIPT = """(model) => {
-    const want = (model || '').trim();
+# 选择指定模型/开关项：按关键词匹配菜单项并点击（返回是否命中可点项）。
+# 关键词只认模型家族名（flash-lite / flash / pro），与网页版本号解耦；
+# 其余文本（如 "扩展思考"）走包含匹配。flash 不命中 flash-lite。
+SET_MODEL_SCRIPT = """(key) => {
+    const want = (key || '').trim().toLowerCase();
     if (!want) return false;
+    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const isLite = (t) => /flash[\\s-]*lite/.test(t);
+    const match = (t) => {
+        if (!t) return false;
+        if (want === 'flash-lite') return isLite(t);
+        if (want === 'flash') return /\\bflash\\b/.test(t) && !isLite(t);
+        if (want === 'pro') return /\\bpro\\b/.test(t);
+        return t.includes(want);
+    };
     const items = Array.from(document.querySelectorAll("[role='menuitem'], [role='menuitemradio']"));
-    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-    let pick = null;
-    pick = items.find(el => norm(el.innerText).includes(want)) || null;
-    if (!pick) pick = items.find(el => (el.getAttribute('aria-label') || '').includes(want)) || null;
+    const pick = items.find(el => match(norm(el.innerText)) || match(norm(el.getAttribute('aria-label'))));
     if (!pick) return false;
     pick.click();
     return true;
@@ -278,16 +322,42 @@ GET_THEME_SCRIPT = """() => {
     return body.classList.contains('dark-theme') ? 'dark' : 'light';
 }"""
 
-# 查询指定菜单项是否被选中（class 含 selected / active，返回是否命中+选中态）
-MODEL_ITEM_SELECTED_SCRIPT = """(model) => {
-    const want = (model || '').trim();
-    if (!want) return {hit: false, selected: false};
+# 查询模型关键词对应的菜单项（返回在菜单中的索引、实际文本与选中态）。
+# 同家族多版本并存时取版本号最高项；版本号解析不出时保持菜单顺序。
+MODEL_ITEM_SELECTED_SCRIPT = """(key) => {
+    const want = (key || '').trim().toLowerCase();
+    if (!want) return {hit: false, index: -1, text: '', selected: false};
+    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const isLite = (t) => /flash[\\s-]*lite/.test(t);
+    const match = (t) => {
+        if (!t) return false;
+        if (want === 'flash-lite') return isLite(t);
+        if (want === 'flash') return /\\bflash\\b/.test(t) && !isLite(t);
+        if (want === 'pro') return /\\bpro\\b/.test(t);
+        return t.includes(want);
+    };
     const items = Array.from(document.querySelectorAll("[role='menuitem'], [role='menuitemradio']"));
-    const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-    const pick = items.find(el => norm(el.innerText).includes(want));
-    if (!pick) return {hit: false, selected: false};
-    const cls = (pick.className && typeof pick.className === 'string') ? pick.className : '';
-    return {hit: true, selected: cls.includes('selected') || cls.includes('active')};
+    const hits = [];
+    for (let i = 0; i < items.length; i++) {
+        const el = items[i];
+        if (match(norm(el.innerText)) || match(norm(el.getAttribute('aria-label')))) {
+            hits.push({index: i, el: el});
+        }
+    }
+    if (!hits.length) return {hit: false, index: -1, text: '', selected: false};
+    const verOf = (el) => {
+        const m = norm(el.innerText).match(/(\\d+(?:\\.\\d+)?)/);
+        return m ? parseFloat(m[1]) : -1;
+    };
+    hits.sort((a, b) => verOf(b.el) - verOf(a.el));
+    const pick = hits[0];
+    const cls = (pick.el.className && typeof pick.el.className === 'string') ? pick.el.className : '';
+    return {
+        hit: true,
+        index: pick.index,
+        text: (pick.el.innerText || '').replace(/\\s+/g, ' ').trim(),
+        selected: cls.includes('selected') || cls.includes('active'),
+    };
 }"""
 # 扩展思考开关：菜单项"扩展思考"当前是否选中
 THINKING_SELECTED_SCRIPT = """() => {

@@ -7,5 +7,8 @@ __pycache__/
 *.png
 *.log
 
+# 豆包 DOM 探测报告（本地校准用，不入库）
+scripts/doubao_probe_report/
+
 # 本地配置（含真实凭据，不入库）
 config/*.local.toml

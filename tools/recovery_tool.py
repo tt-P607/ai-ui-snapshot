@@ -18,6 +18,8 @@ _SITE_ALIASES: dict[str, str] = {
     "ds": "deepseek",
     "gemini": "gemini",
     "google": "gemini",
+    "doubao": "doubao",
+    "db": "doubao",
 }
 
 
@@ -35,13 +37,13 @@ class ResetBrowserTool(_ToolBase):
 
     async def execute(
         self,
-        site: Annotated[str, "要重置的站点：deepseek / gemini（接受别名 ds / google）"] = "deepseek",
+        site: Annotated[str, "要重置的站点：deepseek / gemini / doubao（接受别名 ds / google / db）"] = "deepseek",
         reason: Annotated[str, "重置原因说明（仅作日志记录）"] = "",
     ) -> tuple[bool, str]:
         """执行：关闭指定站点当前流的浏览器会话。
 
         Args:
-            site: 站点主题（deepseek/gemini，接受别名）。
+            site: 站点主题（deepseek/gemini/doubao，接受别名）。
             reason: 重置原因（仅作日志记录）。
 
         Returns:
@@ -49,7 +51,7 @@ class ResetBrowserTool(_ToolBase):
         """
         theme = _SITE_ALIASES.get((site or "").strip().lower(), "")
         if not theme:
-            return False, f"未知站点: {site}（可选 deepseek / gemini）"
+            return False, f"未知站点: {site}（可选 deepseek / gemini / doubao）"
 
         stream_id = self.get_current_stream_id()
         manager = get_manager()
@@ -65,5 +67,5 @@ class ResetBrowserTool(_ToolBase):
         )
 
 
-# 恢复工具列表（供插件装配；DeepSeek/Gemini 任一启用即注册）
+# 恢复工具列表（供插件装配；任一站点启用即注册）
 RECOVERY_TOOLS: list[type] = [ResetBrowserTool]

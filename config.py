@@ -51,6 +51,13 @@ class AiUiSnapshotConfig(BaseConfig):
             tag="ai",
             order=1,
         )
+        doubao: bool = Field(
+            default=False,
+            description="是否启用豆包站点（需先运行 scripts/login_doubao.py 登录）",
+            label="豆包",
+            tag="ai",
+            order=2,
+        )
 
     @config_section("web", title="网页实时模式", tag="ai")
     class WebSection(SectionBase):
@@ -183,9 +190,50 @@ class AiUiSnapshotConfig(BaseConfig):
             tag="ai",
             order=1,
         )
+
+    @config_section("recognize", title="识图接管", tag="ai")
+    class RecognizeSection(SectionBase):
+        """接管框架图片/表情包识别的配置。
+
+        框架收到图片时先经 ``on_media_recognize`` 事件链询问，本插件以更高权重
+        先应答：把图片传给真实 AI 网页得到文字描述，回填给框架当作识图结果。
+        本插件失败（站点未登录、超时等）时自动放行，框架内置 VLM 仍会兜底。
+
+        默认关闭，需要时在配置里开启。
+        """
+
+        enabled: bool = Field(
+            default=False,
+            description="是否接管框架的图片/表情包识别（开启后识图会真实访问站点）",
+            label="启用识图接管",
+            tag="ai",
+            order=0,
+        )
+        site: str = Field(
+            default="deepseek",
+            description="用哪个站点识图：deepseek / doubao / gemini",
+            label="识图站点",
+            tag="ai",
+            order=1,
+        )
+        emoji: bool = Field(
+            default=True,
+            description="是否也接管表情包识别（关闭则表情包仍走框架内置 VLM）",
+            label="接管表情包",
+            tag="ai",
+            order=2,
+        )
+        timeout: int = Field(
+            default=120,
+            description="单张图片识图超时秒数（超时按失败处理，交回框架兜底）",
+            label="识图超时",
+            tag="ai",
+            order=3,
+        )
     plugin: PluginSection = Field(default_factory=PluginSection)
     sites: SitesSection = Field(default_factory=SitesSection)
     web: WebSection = Field(default_factory=WebSection)
     screenshot: ScreenshotSection = Field(default_factory=ScreenshotSection)
     decoration: DecorationSection = Field(default_factory=DecorationSection)
     upload: UploadSection = Field(default_factory=UploadSection)
+    recognize: RecognizeSection = Field(default_factory=RecognizeSection)

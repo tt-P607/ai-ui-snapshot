@@ -1,101 +1,271 @@
 # AI UI Snapshot
 
-拟人化使用 DeepSeek 与 Gemini 的 Neo-MoFox 插件：用 bot 专属账号的登录态驱动真实 AI 网页，通过封装好的高层工具让 bot 像真人一样使用两大 AI 服务，UI 完全真实。
+让 bot 用真人的方式操作 DeepSeek、Gemini、豆包网页：提问、截长图、拿分享链接、生图生视频。另外可以接管框架的图片识别（默认关闭）。
 
-## 功能
+登录态用的是 bot 自己的账号，浏览器打开的是真实网站，所以截图就是真的网页截图，顶部还叠了浏览器外壳（标签页、地址栏、头像）。
+
+## 能干什么
 
 ### DeepSeek
 
-- **一键提问**（`ask_deepseek`）：向 DeepSeek 真实提问，返回回复内容供自然转述。
-- **直接截图**（`deepseek_snapshot`）：直接截取当前/指定 DeepSeek 对话界面为长截图并发送，不提问、不切换模式。
-- **分享链接**（`deepseek_share`）：直接获取当前/指定对话的官方公开分享链接，不提问、不切换模式。
-- **历史会话**（`deepseek_history`）：列出历史会话 / 进入指定会话继续对话。
-- **状态查询**（`deepseek_state`）：查询当前对话模式与深度思考/联网搜索开关状态。
-- **模式支持**：快速模式 / 专家模式 / 识图模式，每个对话模式一经选定即锁定。
-- **开关控制**：深度思考、联网搜索。
+| 工具 | 用途 |
+|---|---|
+| `ask_deepseek` | 提问，返回回复文本。可以带图片或文件，可以控制深度思考和联网搜索开关 |
+| `deepseek_snapshot` | 截当前对话（或指定对话）的长图发出去，不提问 |
+| `deepseek_share` | 拿当前对话的官方分享链接，不提问 |
+| `deepseek_history` | 列历史会话，或者进某个会话接着聊 |
+| `deepseek_state` | 看当前在哪个对话、开关是什么状态 |
 
-### Gemini
+### Gemini（需要代理）
 
-- **一键提问**（`ask_gemini_ai`）：向 Gemini 真实提问（全模态上传图片/语音/视频/文档），返回回复文本。
-- **生成图片**（`gemini_generate_image`）：用 Gemini 原生能力生成图片（可带 1 张/多张参考图改图/参考生成），自动发送到当前聊天。
-- **直接截图**（`gemini_snapshot`）：直接截取当前/指定 Gemini 对话界面为长截图并发送，不提问、不改设置。
-- **分享链接**（`gemini_share`）：直接获取当前/指定 Gemini 对话的官方公开分享链接，不提问。
+| 工具 | 用途 |
+|---|---|
+| `ask_gemini_ai` | 提问，全模态，图片/语音/视频/文档都能带 |
+| `gemini_generate_image` | 让 Gemini 生图，可以带参考图改图，出图自动发到聊天 |
+| `gemini_snapshot` | 截长图发出去 |
+| `gemini_share` | 拿官方分享链接 |
 
-### 通用
+模型名传族关键词就行：`Flash-Lite`、`Flash`、`Pro`。插件按关键词去菜单里找当前版本，站点换了版本号也不会失效。
 
-- **快捷命令**（`/ask`）：显式驱动真实 DeepSeek/Gemini 网页提问并截图（`-g` 切换 Gemini）。
-- **会话重置**（`reset_browser`）：网页会话卡死、页面崩溃或无响应时，关闭并重建指定站点（`site` 参数：`deepseek` / `gemini`）的浏览器会话；相当于关掉浏览器重开进主页，登录态与云端历史对话都保留，可照常继续。
-- **对话定位**（`conversation` 参数）：空沿用当前对话、精确标题进入历史会话（未命中则新建）、`__new__` 强制新建。
-- **长截图**：完整对话长图，思考块默认收起，超长自动分片；截图顶部叠加 1:1 Chromium 矢量浏览器外壳（含动态对话标题、明暗主题自适应、真实 Google 账号头像）。
-- **附带文件**：图片（media_id）或已下载文件一起提问。
+### 豆包
 
-## 前置条件
+| 工具 | 用途 |
+|---|---|
+| `ask_doubao` | 提问。多张图可以一次传进去问，同一个对话里可以连续追问 |
+| `doubao_snapshot` | 截长图发出去 |
+| `doubao_history` | 列历史会话，或者进某个会话接着聊 |
+| `doubao_state` | 看当前档位（快速/专家） |
+| `doubao_generate_image` | 用豆包的生图技能出图，可以带参考图做图生图 |
+| `doubao_generate_video` | 提交视频生成任务，立刻返回，后台等着。生成完会唤醒 bot，由 bot 决定发不发 |
+| `doubao_send_video` | 把生成完的视频发到聊天 |
 
-1. **Neo-MoFox 框架**：本插件是 Neo-MoFox 的插件，需要先安装并运行 Neo-MoFox 框架。
-2. **Python** `>=3.11`。
-3. **Playwright**：插件会自动安装；运行脚本时需已安装（`uv sync` 后可用）。
-4. **Chrome 浏览器**（推荐）：插件优先使用系统安装的正式版 Chrome（Google 反自动化检测只信任正式版 Chrome），未找到时回退 Playwright 自带 Chromium（可能被 Gemini 风控登出，不推荐）。
-5. **本地代理**（仅 Gemini 需要）：访问 Gemini 需代理，默认 `http://127.0.0.1:7890`，可用环境变量 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 覆盖。
-6. **bot 专属账号**：为 bot 注册独立的 DeepSeek / Google 账号并完成一次登录（见下文），避免暴露个人账号数据。
+生图生视频只开放免费模型，付费档位不出现在参数里。
 
-## 安装
+### 识图接管（默认关闭）
 
-将 `plugins/ai_ui_snapshot/` 目录放入 Neo-MoFox 的 `plugins/` 下，重启应用即可自动加载。插件目录内自带脚本（登录、验证），可直接运行。
+框架收到图片时会问一圈"谁能识别"，内置 VLM 排在最后兜底。开启后这个插件会排前面，把图片丢给真实网页识别，拿到描述后交回框架，框架自己的 VLM 就不跑了。
 
-## 快速上手（看完就能用）
+**默认是关的**，要开就把配置里的 `[recognize] enabled` 改成 `true`。开启后每张图会通过真实网页识别一次。
 
-### 第 1 步：登录 bot 账号（一次性）
+站点默认用 DeepSeek，可以换成豆包或 Gemini。
 
-在插件目录运行对应登录脚本，浏览器会打开真实网页，手动为 bot 账号完成登录后自动持久化登录态（保存到项目根 `data/ai_ui_snapshot_profile/<site>/`，已被 `.gitignore` 忽略，不随插件发布）：
+提示词用的是框架的（`config/core.toml` 里 `[chat]` 的 `image_recognition_prompt` 和 `emoji_recognition_prompt`）。插件不自己再定义一份，要改就改框架那边，改一处就够。
+
+中间任何一步失败（没登录、超时、图片读不出来、回复是空的），插件都直接让开，框架自己的 VLM 照常兜底。所以插件出问题时，识图会退回框架自己的实现，不会没有识图。
+
+每次识图会新开一个对话。如果接着旧对话问，一旦图片没传上去，模型会对着上一张图回答，描述就对应到别的图片上了；而描述会被框架按图片哈希缓存，这条描述会被长期复用。新开对话能保证回复只对应当前这张图。都
+
+### 其他
+
+- `/ask` 命令：手动驱动网页提问并截图。`-g` 走 Gemini，`-db` 走豆包，`-m` 指定模型或档位
+- `reset_browser`：网页卡死或崩溃时重建浏览器。登录态和云端历史都还在
+- 所有对话类工具都有 `conversation` 参数：留空接着当前对话，填标题进指定会话，填 `__new__` 强制开新对话
+
+## 装之前先确认这些
+
+| 条件 | 说明 |
+|---|---|
+| Python 3.11+ 和 uv | 框架的要求，依赖用 `uv sync` 装 |
+| 系统装了正式版 Chrome | 插件优先用系统 Chrome，留空会自动找常见安装路径。实在找不到才退回 Playwright 自带的 Chromium，但那个 Gemini 很容易被风控登出，字节系站点也可能反复要验证 |
+| 每个站点一个 bot 账号 | DeepSeek、Google、豆包各登录一次。没登录的话对应工具会直接报错，不会硬用登出状态去操作 |
+| 一个代理（只有 Gemini 要） | 配 `web.proxy_url`，或者设 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。DeepSeek 和豆包直连就行 |
+| 登录时得有图形界面 | 登录脚本会开一个带界面的 Chrome 让你手动登。纯服务器或容器里没桌面的话第一次登录做不了，登完可以把登录态搬走，之后无头跑 |
+| 网络能通 | 站点对频繁调用有频控，调得太勤可能弹人机验证，插件会明确报出来让你手动处理 |
+
+另外几点：
+
+- 无头跑用 `[web] headless = true`（默认就是）。但第一次登录必须在有界面的环境做
+- 登录态放在 `data/ai_ui_snapshot_profile/<站点>/`，`.gitignore` 忽略掉了，不会跟着插件发布。换机器要重新登
+- 配置在 `config/plugins/ai_ui_snapshot/config.toml`，改完要重启 bot
+- 依赖 playwright，`uv sync` 的时候会装上
+- 识图提示词不在插件配置里，读的是框架的 `config/core.toml`
+
+## 怎么跑起来
+
+### 1. 装
+
+把 `plugins/ai_ui_snapshot/` 放到 Neo-MoFox 的 `plugins/` 下面，然后在项目根执行：
 
 ```bash
-# 进入插件目录
-cd plugins/ai_ui_snapshot
-
-# DeepSeek 登录（无需代理）
-uv run python scripts/login_deepseek.py
-
-# Gemini 登录（需代理）
-uv run python scripts/login_gemini.py
+uv sync
 ```
 
-### 第 2 步：确认登录态（可选）
+### 2. 配
+
+改 `config/plugins/ai_ui_snapshot/config.toml`（第一次加载后会生成），先确认这几项：
+
+```toml
+[sites]
+deepseek = true          # 站点开关，不用就关
+gemini   = true          # 要代理，不用就关
+doubao   = true
+
+[web]
+proxy_url = "http://127.0.0.1:7890"   # 只有 Gemini 需要，另外两个留空直连
+headless  = true                      # 无人值守就 true
+
+[screenshot]
+browser_path = ""        # 留空自动找系统 Chrome，也可以写绝对路径
+
+[recognize]
+enabled = false          # 接管框架识图。开启后每张图通过真实网页识别
+site    = "deepseek"     # 用哪个站点：deepseek / doubao / gemini
+emoji   = true           # 表情包要不要也接管
+timeout = 120            # 单张识图超时，秒
+```
+
+### 3. 登录 bot 账号
+
+每个站点登一次。脚本会用普通 Chrome 打开网页让你手动登：
 
 ```bash
-# 用插件完整逻辑跑一次截图验证，产物在 scripts/ 目录
-uv run python scripts/verify_deepseek_screenshot.py   # DeepSeek 截图验证
-uv run python scripts/verify_gemini_screenshot.py     # Gemini 截图验证
+# 在哪个目录跑都行，脚本按自己的位置找项目根
+uv run python plugins/ai_ui_snapshot/scripts/login_deepseek.py
+uv run python plugins/ai_ui_snapshot/scripts/login_gemini.py
+uv run python plugins/ai_ui_snapshot/scripts/login_doubao.py
 ```
 
-### 第 3 步：在聊天中使用
+脚本会弹出浏览器，你在里面登录（想换账号就先在里面退出旧账号再登新的），登完把浏览器窗口关掉。脚本检测到窗口关了，会自己用无头方式验证一下登录态，顺手保存账号头像。
 
-命令 / 工具示例：
-
-```
-/ask 用通俗的语言解释什么是量子纠缠
-/ask -g 帮我写一首关于秋天的短诗          # -g 切换 Gemini
-/ask -m 专家 -c- 换一个专家模式的新对话来聊这个问题
-```
-
-工具（DeepSeek）：`ask_deepseek` / `deepseek_snapshot` / `deepseek_share` / `deepseek_history` / `deepseek_state`
-工具（Gemini）：`ask_gemini_ai` / `gemini_generate_image` / `gemini_snapshot` / `gemini_share`
-工具（通用）：`reset_browser`（卡死/崩溃恢复）
-
-## 截图行为验证
-
-插件内置验证脚本（走插件完整截图逻辑），用于确认长截图行为正确，产物输出到插件 `scripts/` 目录：
+### 4. 确认能用
 
 ```bash
-# DeepSeek 截图验证（思考折叠/侧边栏收起/思考展开三个场景）
-uv run python scripts/verify_deepseek_screenshot.py
+# 看看登录脚本和运行时用的目录是不是同一个、就绪判定认不认得出已登录（要先关 bot）
+uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 
-# Gemini 截图验证（真实长对话 + 可选 --short 短回复场景）
-uv run python scripts/verify_gemini_screenshot.py
-uv run python scripts/verify_gemini_screenshot.py --short
+# 看看浏览器启动参数里有没有会被站点风控盯上的项（不联网）
+uv run python plugins/ai_ui_snapshot/scripts/verify_browser_flags.py
 ```
 
-产物为 `scripts/verify_deepseek_*.png` / `scripts/verify_gemini_*.png`（已被 `.gitignore` 忽略）。
+两个都过，重启 bot 就完事了。可以在聊天里发 `/ask 你好` 试一下，或者让 bot 调 `ask_deepseek`。
 
 ## 配置
 
-见 `config/plugins/ai_ui_snapshot/config.toml`（插件加载后自动生成）：网页实时模式、截图渲染、浏览器外壳装饰（开关 / 主题 / 头像）、图片上传等。
+`config/plugins/ai_ui_snapshot/config.toml`，改完重启生效：
+
+| 节 | 键 | 默认 | 说明 |
+|---|---|---|---|
+| `[plugin]` | `enabled` | `true` | 总开关，关了所有组件都不注册 |
+| `[sites]` | `deepseek` / `gemini` / `doubao` | `true` / `false` / `false` | 站点开关。关了对应工具就不注册，识图也不能用它 |
+| `[web]` | `web_profile_dir` | `data/ai_ui_snapshot_profile` | 登录态目录。换路径要重新登录 |
+| | `reply_timeout` | `240` | 等回复的超时秒数 |
+| | `idle_timeout` | `600` | 浏览器闲多久自动关，`0` 表示不关 |
+| | `headless` | `true` | 无头运行 |
+| | `proxy_url` | `""` | 站点代理，只有 Gemini 要 |
+| | `theme` | `auto` | 页面明暗：`auto` 按本地时间切，或者 `light` / `dark` |
+| `[decoration]` | `enabled` | `true` | 截图顶部叠浏览器外壳 |
+| | `theme` | `auto` | 外壳配色，跟页面主题互相独立 |
+| | `avatar_url` | `""` | 外壳右上角的头像。留空就用登录时存下来的真实头像 |
+| `[screenshot]` | `width` / `height` | `1440` / `900` | 视口尺寸 |
+| | `device_scale_factor` | `2` | 高清倍率 |
+| | `max_height` | `8000` | 长截图单张最高多少像素，超了就切片 |
+| | `browser_path` | `""` | Chrome 路径，留空自动找 |
+| `[upload]` | `enabled` / `max_size_mb` | `true` / `50` | 附件上传开关和大小上限 |
+| `[recognize]` | `enabled` | `false` | 要不要接管框架识图。开启后每张图会通过真实网页识别一次 |
+| | `site` | `deepseek` | 用哪个站点，得在 `[sites]` 里也开着 |
+| | `emoji` | `true` | 表情包要不要也接管 |
+| | `timeout` | `120` | 单张识图超时 |
+
+识图提示词不在这个文件里，读的是框架的 `config/core.toml` → `[chat] image_recognition_prompt` / `emoji_recognition_prompt`，留空就用框架内置的。
+
+## 脚本
+
+都在插件 `scripts/` 下面。日常用的三个：
+
+| 脚本 | 干什么 |
+|---|---|
+| `login_deepseek.py` | DeepSeek 登录或换账号 |
+| `login_gemini.py` | Gemini 登录或换账号（走代理） |
+| `login_doubao.py` | 豆包登录或换账号 |
+
+`login_common.py` 是这三个共用的东西，不是入口，不用管。
+
+验证脚本，改完代码或者换环境之后跑：
+
+| 脚本 | 验什么 | 条件 |
+|---|---|---|
+| `verify_browser_flags.py` | 启动参数里没有会被 Chrome 判定为危险的那些项，`navigator.webdriver` 也藏好了。会看真实进程的命令行 | 不联网 |
+| `verify_login_readiness.py` | 登录脚本和运行时用的是同一个登录态目录，三个站点的就绪判定都能认出已登录 | 先关 bot |
+| `verify_conversation_switch.py` | 用本地假页面跑生产的 JS 和动作类：模型族匹配、扩展思考开关、三个站点进会话的语义 | 不联网 |
+| `verify_real_conversation_switch.py` | 真站点上列历史会话、进指定会话并读回确认、重复进是幂等的、标题不存在会失败 | 关 bot + 联网 |
+| `verify_recognize.py` | 识图接管：提示词来源、事件契约、真实识图、失败让开、临时文件清理干净 | 加 `--no-site` 就全本地 |
+| `verify_deepseek_screenshot.py` | DeepSeek 长截图（思考折叠、侧边栏、思考展开） | 关 bot + 联网 |
+| `verify_gemini_screenshot.py` | Gemini 长截图，加 `--short` 是短回复场景 | 关 bot + 联网 |
+| `verify_doubao_screenshot.py` | 豆包截图全链路 | 关 bot + 联网 |
+| `verify_doubao_full.py` | 豆包登录、提问、附件、截图连起来跑 | 关 bot + 联网 |
+| `verify_doubao_media.py` | 豆包生图生视频的产物落盘 | 关 bot + 联网 |
+| `verify_doubao_attachment.py` | 豆包附件上传和计数 | 关 bot + 联网 |
+
+要关 bot 的原因：登录态就是同一个 `user_data_dir`，两个 Chrome 同时用会崩（exitCode=21）。
+
+还有一堆 `probe_*` 和 `diag_*` 脚本，是站点改版后校准选择器用的，会把页面结构 dump 出来看。平时不用管。
+
+## 几个约定
+
+### `conversation` 参数
+
+| 传什么 | 结果 |
+|---|---|
+| 空 | 接着当前对话聊。同一个聊天流复用同一个浏览器页面，所以是连续的 |
+| 标题 | 进这个历史会话。标题不存在的话，提问工具会新建一个对话继续；截图和分享工具会报错，因为它们不该去操作一个空会话 |
+| `__new__` | 强制开新对话 |
+
+判断"进没进会话"只看一件事：列表里能不能找到这个标题并点开。点完之后会轮询几秒确认切换生效，没确认到只记一行日志、不会阻断后面的动作。页面没及时刷新不代表没进去，要是因此就报失败，上层会白白放弃截图或提问。
+
+### 识图接管的返回
+
+| 情况 | 插件返回 | 结果 |
+|---|---|---|
+| 识图成功 | `SUCCESS`，写上描述和 `engine_processed=True` | 框架内置 VLM 看到标记就不跑了 |
+| 接管关了 / 站点没启用 / 是语音或视频 / 不是图片 | `PASS` | 交回框架内置 VLM |
+| 识图失败（没登录、超时、图片读不出来、回复空） | `PASS` | 交回框架内置 VLM |
+
+### 遇到问题怎么办
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 报"登录态失效" | 站点把你蹬了 | 重跑对应的 `login_*.py` |
+| Gemini 全挂 | 代理没配或没开，或者登录态被风控清了 | 检查 `web.proxy_url`，重新登录 |
+| 豆包报"触发了人机验证" | 调得太频繁 | 手动在浏览器里过验证，然后降低频率 |
+| 页面卡死、没反应 | 浏览器会话出问题 | 调 `reset_browser`，登录态和历史都留着 |
+| 识图没生效 | `[recognize] enabled` 还是 `false`（默认就没开）、站点没在 `[sites]` 里开、或者框架没注册提示词模板 | 挨个查一遍，插件日志会写清楚是哪个原因 |
+| 截图顶部没有浏览器外壳 | `[decoration] enabled=false` | 打开就行 |
+| 长截图被切成好几张 | 对话太长，超过 `screenshot.max_height` 了 | 分片是正常行为；不想分片可以调大 `max_height` |
+
+## 为什么登录不用自动化
+
+登录脚本是用 `subprocess` 直接启动普通 Chrome 的，只传 `--user-data-dir` 和（需要的话）`--proxy-server`。没有 Playwright，没有调试通道。
+
+原因是踩出来的：Chromium 的 `kBadFlags` 名单（在 `chrome/browser/ui/startup/bad_flags_prompt.cc`）把 `--no-sandbox` 和 `--disable-blink-features` 都算危险参数。带上它们 Chrome 会在页面顶上弹一条"您使用的是不受支持的命令行标记"，Google 登录页看到这条就直接拒绝登录，提示"此浏览器或应用可能不安全"，点重试也没用。
+
+其中 `--no-sandbox` 是 Playwright 默认加上的，不是我们写的，得用 `ignore_default_args` 剔掉才有效。所以现在运行时的会话也不传任何自定义启动参数了，`navigator.webdriver` 那些指纹改由页面脚本藏。
+
+登录完成后脚本会用运行时那套无头会话再验证一次（确认真登上了、顺手存头像），这样"登录时的环境"和"运行时的环境"是同一套。
+
+## 目录
+
+```
+plugins/ai_ui_snapshot/
+├── config.py                 配置定义，框架照着它生成 config/plugins/ai_ui_snapshot/config.toml
+├── plugin.py                 入口，按站点开关装配组件
+├── manifest.json             清单（组件、依赖、版本）
+├── commands/ask_command.py   /ask 命令
+├── event_handler/
+│   └── media_recognize.py    识图接管
+├── services/
+│   ├── service.py            统一入口（提问、截图、分享、识图）
+│   ├── base/                 浏览器会话、通用页面动作、外壳装饰
+│   └── deepseek/ gemini/ doubao/   各站点的常量和动作
+├── tools/                    给模型用的工具
+└── scripts/                  登录、验证、诊断脚本
+```
+
+运行时会往这些地方写东西，都不跟着插件发布：
+
+- `data/ai_ui_snapshot_profile/<站点>/` 登录态和账号资产
+- `data/ai_ui_snapshot_profile/<站点>/images/`、`videos/` 生成的图和视频
+- `data/media_cache/` 框架的媒体缓存
+
+## 许可
+
+GPL-3.0，见 `LICENSE`。

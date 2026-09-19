@@ -70,6 +70,7 @@ class GeminiActions(PageActions):
     conversation_text_script: str = CONVERSATION_TEXT_SCRIPT
     active_title_script: str = ACTIVE_CONVERSATION_TITLE_SCRIPT
     active_id_script: str = ACTIVE_CONVERSATION_ID_SCRIPT
+    fingerprint_script: str = FINGERPRINT_SCRIPT
 
     def __init__(
         self,
@@ -140,7 +141,7 @@ class GeminiActions(PageActions):
         """读取当前对话的模型（模式选择器按钮 aria-label 中"当前模式为"）。
 
         Returns:
-            str | None: 模型名（如 3.6 Flash）；无法识别时返回 None。
+            str | None: 网页上的完整模型名（如 3.7 Flash）；无法识别时返回 None。
         """
         try:
             return str(await self._page.evaluate(GET_MODEL_SCRIPT) or "").strip() or None
@@ -148,14 +149,16 @@ class GeminiActions(PageActions):
             return None
 
     @staticmethod
-    def _model_key(model: str) -> str:
-        """归一化模型名为匹配 key（取核心词，忽略版本/后缀/扩展思考）。
+    def model_family(model: str) -> str:
+        """归一化模型名到模型族（忽略版本号与"扩展"后缀）。
 
         Args:
-            model: 模型名（如 3.6 Flash / Flash / Flash 扩展）。
+            model: 模型名（族关键词如 Flash / Flash-Lite / Pro，或网页上的
+                完整名如 3.7 Flash）。
 
         Returns:
-            str: 归一化 key（如 flash / pro / 扩展思考）。
+            str: 归一化族关键词（flash-lite / flash / pro；无法识别时返回
+                小写原名；"扩展思考" 作为独立开关单独返回）。
         """
         s = (model or "").strip().lower()
         if "扩展思考" in s:
@@ -226,12 +229,13 @@ class GeminiActions(PageActions):
     async def set_model(self, model: str) -> tuple[bool, str]:
         """切换 Gemini 对话模型（不改变"扩展思考"开关状态）。
 
-        先点击模式选择器按钮展开菜单，再在菜单项中按文本匹配目标模型并点击；
-        用菜单项的选中 class（selected）校验是否真正切换成功。
+        按家族关键词（Flash / Flash-Lite / Pro）匹配菜单项，与网页版本号解耦：
+        菜单为 3.6 Flash / 3.7 Flash 时 "Flash" 均命中，同家族多版本并存时
+        取版本号最高项。当前已在该家族时直接返回成功（不做无谓切换）。
 
         Args:
-            model: 目标模型名（支持 3.5 Flash-Lite / 3.6 Flash / 3.1 Pro，
-                或缩写如 Flash / Pro；传"扩展思考"请改用 set_thinking）。
+            model: 目标模型族关键词（Flash / Flash-Lite / Pro）；传"扩展思考"
+                请改用 set_thinking。
 
         Returns:
             tuple[bool, str]: (是否切换成功, 当前选中模型或错误信息)。
@@ -239,32 +243,37 @@ class GeminiActions(PageActions):
         normalized = (model or "").strip()
         if not normalized:
             return False, "模型名不能为空"
-        if self._model_key(normalized) == "扩展思考":
+        key = self.model_family(normalized)
+        if key == "扩展思考":
             return False, "扩展思考是独立开关，请用 set_thinking 控制"
         page = self._page
         try:
-            # 1. 展开模式选择器
+            # 1. 已在目标族：无需切换（避免开菜单点击的无谓操作与失败面）
+            current = await self.get_model() or ""
+            if current and self.model_family(current) == key:
+                return True, current
+            # 2. 展开模式选择器
             await page.evaluate(OPEN_MODEL_MENU_SCRIPT)
             await page.wait_for_timeout(800)
-            # 2. 先确认菜单项存在（避免点击落空），再点击
-            state = await page.evaluate(MODEL_ITEM_SELECTED_SCRIPT, normalized)
-            hit = isinstance(state, dict) and state.get("hit")
-            if not hit:
+            # 3. 按关键词定位菜单项（取版本号最高项，索引与 DOM 顺序一致）
+            state = await page.evaluate(MODEL_ITEM_SELECTED_SCRIPT, key)
+            info = state if isinstance(state, dict) else {}
+            if not info.get("hit"):
                 await page.keyboard.press("Escape")
                 return False, f"未找到模型: {normalized}（可选: {', '.join(SUPPORTED_MODELS)}）"
-            item = page.locator(MODEL_MENU_ITEM_SELECTOR).filter(has_text=normalized).first
+            index = int(info.get("index") or 0)
+            item = page.locator(MODEL_MENU_ITEM_SELECTOR).nth(index)
             if await item.count() > 0:
                 await item.click(timeout=5000)
             else:
-                await page.evaluate(SET_MODEL_SCRIPT, normalized)
+                await page.evaluate(SET_MODEL_SCRIPT, key)
             await page.wait_for_timeout(1000)
-            # 3. 用 get_model 短名归一化校验（菜单已关闭，用 aria-label 判断）
-            current = await self.get_model() or ""
-            if current and self._model_key(current) == self._model_key(normalized):
-                await page.keyboard.press("Escape")
-                return True, current
+            # 4. 校验：菜单已关闭，用模式选择器按钮的模型名归一化比对
+            after = await self.get_model() or ""
             await page.keyboard.press("Escape")
-            return False, f"切换模型失败，当前为: {current or '未知'}"
+            if after and self.model_family(after) == key:
+                return True, after
+            return False, f"切换模型失败，当前为: {after or '未知'}"
         except Exception as exc:  # noqa: BLE001 - 切换失败
             return False, f"切换模型失败: {exc}"
 
@@ -373,25 +382,36 @@ class GeminiActions(PageActions):
     async def open_conversation(self, title: str) -> bool:
         """进入指定标题的历史会话。
 
-        按侧边栏文本匹配（精确 > 前缀 > 包含）并点击；用会话指纹（消息数 +
-        当前 URL）校验是否真正切换。
+        成功判据只有一条：侧边栏里能按标题找到并点开该项。点击后轮询确认
+        切换是否生效，未确认只记日志、不影响返回——页面未及时更新 URL/标题
+        不代表没进去，据此报错会让上层放弃截图/提问，是更糟的结果。
 
         Args:
             title: 历史会话标题（取自 list_conversations）。
 
         Returns:
-            bool: 是否成功进入。
+            bool: 是否找到并打开了目标会话；标题不在侧边栏时为 False。
         """
+        page = self._page
+        want = (title or "").strip()
+        if not want:
+            return False
         try:
-            before = str(await self._page.evaluate(FINGERPRINT_SCRIPT) or "")
-            ok = bool(await self._page.evaluate(HISTORY_OPEN_SCRIPT, title))
-            if not ok:
+            # 1. 已在目标会话：直接成功（重复点击同一项没有意义）
+            if (await self.get_active_conversation_title()) == want:
+                return True
+            # 2. 侧边栏定位该项（返回目标会话 ID 供确认切换）
+            before_fp = str(await page.evaluate(FINGERPRINT_SCRIPT) or "")
+            hit = await page.evaluate(HISTORY_OPEN_SCRIPT, want)
+            info = hit if isinstance(hit, dict) else {}
+            if not info.get("ok"):
                 return False
-            await self._page.wait_for_timeout(1500)
-            after = str(await self._page.evaluate(FINGERPRINT_SCRIPT) or "")
-            if before == after:
-                logger.warning(f"进入历史会话 [{title}] 后指纹未变化，可能未生效")
-                return False
+            # 3. 等待切换生效（仅日志，不阻断）
+            target_id = str(info.get("id") or "").strip().lower()
+            if not await self._wait_session_switch(
+                target_id=target_id, target_title=want, before_fingerprint=before_fp
+            ):
+                logger.info(f"进入历史会话 [{want}] 后未观测到切换，按当前页面继续")
             return True
         except Exception:  # noqa: BLE001 - 页面未就绪
             return False

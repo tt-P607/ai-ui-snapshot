@@ -69,12 +69,24 @@ BROWSER_CHROME_SCRIPT = """(payload) => {
     };
 
     const favicon = (document.querySelector('link[rel~="icon"]') || {}).href || '';
-    // 动态提取当前活跃对话的标题
+    // 动态提取当前活跃对话的标题（各站点侧边栏活跃项 class 不同，逐级兜底）：
+    // 1. DeepSeek 侧边栏对应会话项（新 UI 不给选中项加语义标记类，改按 URL
+    //    中的会话 UUID 反查历史项）
+    // 2. 通用 header/h1 标题元素
+    // 3. document.title（各站点均可用）
     let chatTitle = '';
-    const activeSidebar = document.querySelector('div[class*="_546d736"].active, [class*="_546d736"][data-active="true"]');
-    if (activeSidebar) {
-        chatTitle = (activeSidebar.innerText || '').split(/\\r?\\n/)[0].trim();
-    }
+    try {
+        const path = location.pathname || '';
+        const idx = path.indexOf('/a/chat/s/');
+        const cid = idx >= 0 ? path.slice(idx + 10).split('/')[0].toLowerCase() : '';
+        if (cid) {
+            for (const a of document.querySelectorAll('a[href*="/a/chat/s/"]')) {
+                if (!(a.getAttribute('href') || '').toLowerCase().includes(cid)) continue;
+                chatTitle = (a.innerText || '').split(/\\r?\\n/)[0].trim();
+                if (chatTitle) break;
+            }
+        }
+    } catch (e) { chatTitle = ''; }
     if (!chatTitle) {
         const headerTitleEl = document.querySelector('.ds-header-title, [class*="header"] h1, [class*="title"]');
         if (headerTitleEl) chatTitle = (headerTitleEl.innerText || '').trim();
@@ -82,14 +94,24 @@ BROWSER_CHROME_SCRIPT = """(payload) => {
     if (!chatTitle) {
         chatTitle = (document.title || '').trim();
     }
+    // 站点品牌后缀：按域名识别（chat.deepseek.com / gemini.google.com / www.doubao.com）
+    let siteBrand = '';
+    try {
+        const host = location.host || '';
+        if (host.includes('deepseek')) siteBrand = 'DeepSeek';
+        else if (host.includes('google')) siteBrand = 'Gemini';
+        else if (host.includes('doubao')) siteBrand = '豆包';
+    } catch (e) { siteBrand = ''; }
     if (!chatTitle) {
-        chatTitle = 'DeepSeek - 探索未至之境';
-    } else if (!chatTitle.includes('DeepSeek') && !chatTitle.includes('Gemini')) {
-        chatTitle = chatTitle + ' - DeepSeek';
+        chatTitle = siteBrand === 'DeepSeek'
+            ? 'DeepSeek - 探索未至之境'
+            : (siteBrand || 'AI 对话');
+    } else if (siteBrand && !chatTitle.includes(siteBrand)) {
+        chatTitle = chatTitle + ' - ' + siteBrand;
     }
     const title = chatTitle;
 
-    let urlHost = 'chat.deepseek.com';
+    let urlHost = 'www.doubao.com';
     let urlPath = '';
     try {
         const u = new URL(location.href);

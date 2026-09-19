@@ -1,17 +1,32 @@
 """DeepSeek 站点专属常量与归一化工具。
 
-集中管理 DeepSeek 网页的哈希选择器、对话模式、开关名、脚本与归一化映射，
-供服务层（BrowserActions）与业务层（snapshot_service / tools / commands）
-复用，避免魔法字符串散落各处。选择器依赖站点 DOM，变动时仅需在此同步。
+集中管理 DeepSeek 网页的选择器、开关名、脚本与归一化映射，供服务层
+（BrowserActions）与业务层（snapshot_service / tools / commands）复用，
+避免魔法字符串散落各处。选择器依赖站点 DOM，变动时仅需在此同步。
+
+DeepSeek 网页已下线对话模式选择（快速/专家/识图），站点能力只剩开关
+（深度思考 / 智能搜索）与对话本身，故此处不再维护模式相关常量。
 """
 
 from __future__ import annotations
 
+# 登录态就绪判定脚本（登录脚本与运行时共用，参数为就绪文案数组）：
+# 页面正文出现任一就绪文案，且不含登录页关键词。
+READY_CHECK_SCRIPT = """(markers) => {
+    const text = (document.body.innerText || '').replace(/\\s+/g, ' ');
+    if (!markers.some(m => text.includes(m))) return false;
+    const loginWords = ['登录', '手机号', '扫码'];
+    return !loginWords.some(m => text.includes(m));
+}"""
+
+# 就绪文案（与 READY_CHECK_SCRIPT 配套）：任一出现即视为已进入对话界面
+READY_MARKERS: tuple[str, ...] = (
+    "给 DeepSeek 发送消息",
+    "开启新对话",
+    "深度思考",
+)
 # DeepSeek 官方默认入口（会话管理器据此定位登录态 profile 与默认 URL）
 SITE_URL = "https://chat.deepseek.com/"
-
-# DeepSeek 支持的对话模式（与网页模式选择器文案一致）
-SUPPORTED_MODES: tuple[str, ...] = ("快速模式", "专家模式", "识图模式")
 
 # 开关名称（深度思考 / 智能搜索），页面与业务层统一引用
 THINK_TOGGLE_NAME = "深度思考"
@@ -43,32 +58,29 @@ SET_THEME_SCRIPT = """(theme) => {
     } catch (e) { return false; }
 }"""
 
-# 模式选择器选项容器（带 aria-checked，真正可点的元素）
-MODE_OPTION_SELECTOR = "div[class*='_9f2341b']"
-
-# 模式选择器触发按钮（隐藏辅助文本 span）
-MODE_TRIGGER_SELECTOR = "span[class*='321831d']"
-
-# 开关容器（深度思考/智能搜索，激活时追加 ds-toggle-button--selected）
-TOGGLE_SELECTOR = "div[class*='f79352dc']"
-
-# 侧边栏外框 / 内层 flex 容器 / 历史会话项 class 片段
-SIDEBAR_OUTER_CLASS = "dc04ec1d"
-SIDEBAR_INNER_CLASS = "b8812f16"
-HISTORY_ITEM_CLASS = "_546d736"
+# 开关容器（深度思考/智能搜索）：语义类名 ds-toggle-button 稳定，
+# 选中态由 aria-pressed 布尔属性表达（不做 class 判定，避免哈希类名漂移）。
+TOGGLE_SELECTOR = "div.ds-toggle-button[aria-pressed]"
 
 # 等待 AI 回复完成的轮询间隔（秒）
 POLL_INTERVAL_S = 2.0
 
-# 生成中指示器探测脚本：DeepSeek 生成回复时会显示"停止生成"按钮（含停止图标），
-# 该按钮存在即视为仍在生成。用于 wait_reply_done 的强信号判定。
+# 生成中指示器探测脚本：DeepSeek 生成回复期间，输入框右侧的发送按钮会切换
+# 为"停止"按钮（圆形图标变为方块）并解除禁用；输入框为空时发送按钮本应保持
+# 禁用，故"输入框为空且发送按钮未禁用"即表示仍在生成。
+# 新版 UI 已移除文案为"停止生成"的按钮，文案判定仅作为旧版兼容保留。
 GENERATING_SCRIPT = """() => {
-    const btns = Array.from(document.querySelectorAll('button, [role="button"], div'));
-    for (const el of btns) {
+    for (const el of document.querySelectorAll('button, [role="button"]')) {
         const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-        if (t && (t.includes('停止生成') || t === 'Stop')) return true;
+        if (t && (t.includes('停止生成') || t === '停止回答' || t === 'Stop')) return true;
     }
-    return false;
+    const ta = document.querySelector('textarea');
+    if (!ta || (ta.value || '').length > 0) return false;
+    const send = document.querySelector('div[role="button"].ds-button--primary.ds-button--circle');
+    if (!send) return false;
+    const r = send.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    return !/ds-button--disabled/.test(send.className);
 }"""
 
 # 页面可见性检测脚本（返回消息容器是否已撑开可见）
@@ -385,17 +397,20 @@ SIDEBAR_SCRIPT = """(mode) => {
 }"""
 
 # 消息文本提取脚本：
-# - last：取最后一个 .ds-message 的 .ds-markdown 正文（纯 AI 回复，不含思考块）
-# - full：汇总全部 .ds-message 的正文（用户消息取 innerText，AI 消息取
-#   .ds-markdown；思考块文字自然被排除）。
-# 依据探测：DeepSeek 所有消息均在 .ds-message 中可枚举，虚拟列表不卸载历史。
+# - last：取最新一条 AI 回复的主正文（.ds-assistant-message-main-content）
+# - full：汇总全部 .ds-message 的正文（用户消息取 innerText，AI 消息取主正文）
+# 依据探测：DeepSeek 所有消息均在 .ds-message 中可枚举；AI 消息的思考过程块
+# 内部同样含 .ds-markdown，故取正文时必须排除思考块内的节点，否则会把
+# "思考过程"当成回复正文返回。
 CONVERSATION_TEXT_SCRIPT = """(scope) => {
     const msgs = Array.from(document.querySelectorAll('.ds-message'));
     if (msgs.length === 0) return '';
+    const mainOf = (m) => m.querySelector('.ds-assistant-message-main-content')
+        || Array.from(m.querySelectorAll('.ds-markdown')).find((el) => !el.closest('.ds-think-content'))
+        || null;
     if (scope === 'last') {
-        // 最新一条 AI 回复：取最后一个含 .ds-markdown 的消息（用户消息不计入）
         for (let i = msgs.length - 1; i >= 0; i--) {
-            const md = msgs[i].querySelector('.ds-markdown');
+            const md = mainOf(msgs[i]);
             if (md) return (md.innerText || '').trim();
         }
         // 无 AI 回复（如思考中）时返回空，等待轮询继续
@@ -403,7 +418,7 @@ CONVERSATION_TEXT_SCRIPT = """(scope) => {
     }
     const parts = [];
     for (const m of msgs) {
-        const md = m.querySelector('.ds-markdown');
+        const md = mainOf(m);
         const txt = md ? (md.innerText || '') : (m.innerText || '');
         const clean = txt.trim();
         if (clean) parts.push(clean);
@@ -411,12 +426,16 @@ CONVERSATION_TEXT_SCRIPT = """(scope) => {
     return parts.join('\\n\\n');
 }"""
 
-# 会话指纹脚本：消息数 + 页面标题，用于校验 open_conversation 是否真正切换会话。
-# 消息数比首条消息文本更可靠（不同会话可能首条相似），标题反映当前会话主题。
+# 会话指纹脚本：会话 ID + 消息数 + 首条消息摘要，用于校验 open_conversation
+# 是否真正切换会话。会话 ID 取自 URL，切换会话必然变化，是最可靠的判据；
+# 消息数与首条摘要用于同 ID 下的内容变化兜底（新建对话 ID 尚未生成时）。
 FINGERPRINT_SCRIPT = """() => {
+    const m = (location.pathname || '').match(/\\/a\\/chat\\/s\\/([0-9a-f-]{8,})/i);
+    const cid = m ? m[1].toLowerCase() : '';
     const msgs = document.querySelectorAll('.ds-message');
-    const title = (document.title || '').trim();
-    return msgs.length + ':' + title;
+    const first = document.querySelector('.ds-message');
+    const head = first ? (first.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40) : '';
+    return cid + ':' + msgs.length + ':' + head;
 }"""
 
 # 侧边栏历史会话列表提取：返回去重后的会话标题（A 标签 _546d736 为可点会话项）。
@@ -465,11 +484,12 @@ HISTORY_SCROLL_SCRIPT = """() => {
 }"""
 
 # 点击指定标题的历史会话：在侧边栏按多级文本匹配（精确 > 前缀 > 首个包含）选
-# 候选，找到后向上定位可点容器并点击，返回是否命中。
+# 候选，找到后向上定位可点容器并点击。返回 {ok, id}：id 为目标项 href 中的
+# 会话 ID，供调用方校验切换确实生效；href 无 ID 时返回空串。
 HISTORY_OPEN_SCRIPT = """(title) => {
     const norm = (s) => (s || '').trim().replace(/\\n+/g, ' ').replace(/\\s+/g, ' ');
     const want = norm(title);
-    if (!want) return false;
+    if (!want) return {ok: false, id: ''};
     const links = Array.from(document.querySelectorAll('[class*="dc04ec1d"] a, [class*="b8812f16"] a'));
     const seen = new Set();
     const candidates = [];
@@ -485,7 +505,8 @@ HISTORY_OPEN_SCRIPT = """(title) => {
     pick = candidates.find(c => c.txt === want) || null;
     if (!pick) pick = candidates.find(c => c.txt.startsWith(want)) || null;
     if (!pick) pick = candidates.find(c => c.txt.includes(want)) || null;
-    if (!pick) return false;
+    if (!pick) return {ok: false, id: ''};
+    const m = (pick.a.getAttribute('href') || '').match(/\\/a\\/chat\\/s\\/([0-9a-f-]{8,})/i);
     let clickable = pick.a;
     let cur = pick.a;
     for (let i = 0; i < 5 && cur && cur !== document.body; i++) {
@@ -499,53 +520,95 @@ HISTORY_OPEN_SCRIPT = """(title) => {
         cur = cur.parentElement;
     }
     clickable.click();
-    return true;
+    return {ok: true, id: m ? m[1].toLowerCase() : ''};
 }"""
 
-# 当前活跃对话标题提取：从侧边栏历史会话项中找 active 项取标题，与
-# BROWSER_CHROME_SCRIPT 的标题提取逻辑一致（复用 _546d736.active 选择器）。
-# 无 active 项时回退到侧边栏 aria-current/aria-selected 高亮项。
+# 当前活跃对话标题提取：按 URL 会话 ID 匹配侧边栏历史会话项取其标题。
+# 新 UI 不再给选中项加 .active/aria-current 等语义标记（只有一个哈希类），
+# 故改用 URL 中的会话 UUID 反查历史项，选择器与状态类解耦。
+# 全部未命中时回退到 document.title（会话页标题形如 "标题 - DeepSeek"）。
 ACTIVE_CONVERSATION_TITLE_SCRIPT = """() => {
-    const el = document.querySelector('div[class*="_546d736"].active, [class*="_546d736"][data-active="true"]');
-    if (el) {
-        const t = (el.innerText || '').split(/\\r?\\n/)[0].trim();
+    const m = (location.pathname || '').match(/\\/a\\/chat\\/s\\/([0-9a-f-]{8,})/i);
+    const cid = m ? m[1].toLowerCase() : '';
+    if (!cid) return '';
+    for (const a of document.querySelectorAll('a[href*="/a/chat/s/"]')) {
+        const href = (a.getAttribute('href') || '').toLowerCase();
+        if (!href.includes(cid)) continue;
+        const t = (a.innerText || '').split(/\\r?\\n/)[0].trim();
         if (t) return t;
     }
-    const active = document.querySelector('[class*="b8812f16"] [aria-current="page"], [class*="b8812f16"] [aria-selected="true"]');
-    if (active) {
-        const t = (active.innerText || '').trim();
-        if (t) return t;
-    }
+    const raw = (document.title || '').trim();
+    const stripped = raw.replace(/\\s*[-|]\\s*DeepSeek\\s*$/i, '').trim();
+    if (stripped && stripped !== raw && stripped !== 'DeepSeek') return stripped;
     return '';
 }"""
 
-# 当前活跃对话稳定 ID 提取：从 URL 中提取会话 UUID 段（pathname/hash 中
-# 首个连续 8 位以上十六进制段），作为模式锁的稳定 key。会话切换时 URL 的
-# UUID 段随之变化，标题会变而 ID 稳定，故锁以 ID 为准、标题仅作展示。
+# 当前活跃对话稳定 ID 提取：URL 中 /a/chat/s/<UUID> 的 UUID 段。
+# 会话切换时该段随之变化，标题会变而 ID 稳定，故 ID 作为会话身份标识。
 ACTIVE_CONVERSATION_ID_SCRIPT = """() => {
-    const m = (location.href || '').match(/[0-9a-f]{8,}/i);
-    return m ? m[0].toLowerCase() : '';
+    const m = (location.pathname || '').match(/\\/a\\/chat\\/s\\/([0-9a-f-]{8,})/i);
+    if (m) return m[1].toLowerCase();
+    const fallback = (location.href || '').match(/[0-9a-f]{8,}/i);
+    return fallback ? fallback[0].toLowerCase() : '';
 }"""
 
-
-def normalize_mode(mode: str) -> str | None:
-    """将模式别名归一化为标准模式名。
-
-    Args:
-        mode: 原始模式输入（如 快速 / 快速模式 / 专家）。
-
-    Returns:
-        str | None: 标准模式名；无法识别时返回 None。
-    """
-    alias = {
-        "快速": "快速模式",
-        "快速模式": "快速模式",
-        "专家": "专家模式",
-        "专家模式": "专家模式",
-        "识图": "识图模式",
-        "识图模式": "识图模式",
+# 顶栏分享按钮定位脚本：返回按钮中心视口坐标（供上层真实鼠标点击）。
+# 会话页顶部标题区使用语义类名 the-header，分享按钮与该标题同级，
+# 因此先在标题所在容器内取最靠右的可点按钮；退化时在整页按"视口上部
+# （y < 80）且不在侧边栏内"筛出最靠右的可点按钮。非会话页（首页）无此按钮。
+SHARE_BUTTON_SCRIPT = """() => {
+    const inSidebar = (el) => !!el.closest('[class*="dc04ec1d"], [class*="b8812f16"]');
+    const pick = (root) => Array.from(root.querySelectorAll('div[role="button"], button'))
+        .filter((el) => !inSidebar(el))
+        .filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= 80;
+        })
+        .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+    const header = document.querySelector('.the-header');
+    const scopes = header && header.parentElement ? [header.parentElement, document] : [document];
+    for (const scope of scopes) {
+        for (const el of pick(scope)) {
+            const r = el.getBoundingClientRect();
+            return {x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2)};
+        }
     }
-    return alias.get((mode or "").strip())
+    return null;
+}"""
+
+# 分享链接读取脚本：分享弹窗生成链接后展示在弹窗 footer 文本中
+# （形如 "https://chat.deepseek.com/share/xxx 复制"），从文本中按空白切出 URL。
+# 优先取真实的 <a href>，其次从弹窗文本中截取，避免依赖剪贴板读取
+# （剪贴板读取需页面焦点与授权，无头/后台环境下会阻塞）。
+SHARE_LINK_SCRIPT = """() => {
+    const a = document.querySelector('a[href*="/share/"]');
+    if (a && a.href) return a.href;
+    const root = document.querySelector('.ds-modal-content__footer')
+        || document.querySelector('.ds-modal') || document.body;
+    const txt = root ? (root.innerText || '') : '';
+    const at = txt.indexOf('/share/');
+    if (at < 0) return '';
+    const isWs = (c) => c.charCodeAt(0) <= 32;
+    let start = at;
+    while (start > 0 && !isWs(txt[start - 1])) start--;
+    let end = at;
+    while (end < txt.length && !isWs(txt[end])) end++;
+    return txt.slice(start, end).trim();
+}"""
+
+# 分享弹窗关闭按钮定位脚本：返回弹窗右上角关闭按钮的中心视口坐标。
+SHARE_MODAL_CLOSE_SCRIPT = """() => {
+    const scope = document.querySelector('.ds-modal-content__header-wrapper')
+        || document.querySelector('.ds-modal');
+    if (!scope) return null;
+    for (const b of scope.querySelectorAll('div[role="button"], button')) {
+        const r = b.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+            return {x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2)};
+        }
+    }
+    return null;
+}"""
 
 
 def normalize_think(think: str) -> str | None:

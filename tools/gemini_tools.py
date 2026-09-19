@@ -48,8 +48,9 @@ class AskGeminiAiTool(_ToolBase):
         "把语音 media_id 传给 image_id，让 Gemini 全模态听出说了什么、还能听出环境音与"
         "语气调调；②看视频，把视频 media_id 传给 image_id，Gemini 能看懂画面并"
         "详细转述内容，转述后你当作自己亲眼看过一样自然带出；③多模态理解、深度推理、长文。"
-        "model 可指定模型（3.5 Flash-Lite 极速 / 3.6 Flash 全方位 / "
-        "3.1 Pro 高阶），空默认用 3.6 Flash。Gemini 不锁定模型，每次调用可按需切换，"
+        "model 可指定模型（Flash-Lite 极速 / Flash 全方位 / "
+        "Pro 高阶，按关键词匹配网页当前可用版本），空默认用 Flash。"
+        "Gemini 不锁定模型，每次调用可按需切换，"
         "无需开新对话。think 控制是否开启扩展思考（深度思考）：true 开 / false 关 / "
         "空由你按问题复杂度自主决定——复杂推理/数学/代码题可开，简单问答不必开。"
         "conversation 控制对话定位：空沿用当前、精确标题进入历史会话（未命中新建）、"
@@ -60,7 +61,7 @@ class AskGeminiAiTool(_ToolBase):
     async def execute(
         self,
         question: Annotated[str, "要提问的问题原文（完整、自然语言）"] = "",
-        model: Annotated[str, "Gemini 模型：'3.5 Flash-Lite'/'3.6 Flash'/'3.1 Pro'，空默认用 3.6 Flash"] = "",
+        model: Annotated[str, "Gemini 模型关键词：'Flash-Lite'（极速）/'Flash'（全方位，默认）/'Pro'（高阶），自动匹配网页当前版本"] = "",
         think: Annotated[bool | None, "是否开启扩展思考（深度思考）：true 开 / false 关 / 空由你按问题复杂度自主决定"] = None,
         conversation: Annotated[str, "对话定位：空（默认）沿用当前对话；历史会话精确标题则进入继续；'__new__' 强制开新对话"] = "",
         image_id: Annotated[str, "附带提问的媒体 media_id（聊天里图片/语音/视频占位符 [media(media_id)] 中的哈希），可空；语音即转述说了什么、视频即看画面内容"] = "",
@@ -256,7 +257,8 @@ class GeminiSnapshotTool(_ToolBase):
         "直接截取 Gemini 对话界面为官方长截图并发送到当前聊天，不提问、不改模型/扩展思考开关。"
         "适用于：对方想直接看 Gemini 原始界面、或 Gemini 回复很长（人懒得总结）时，"
         "把界面截图甩给对方看。conversation 参数控制截哪个会话："
-        "空（默认）截当前对话；传历史会话精确标题则进入该会话再截（未命中则新建）；"
+        "空（默认）截当前对话；传历史会话精确标题则进入该会话再截（标题用 gemini 提问工具"
+        "返回的 conversation 字段或历史列表获取，未命中报错）；"
         "传 __new__ 开新对话（空会话，一般不用）。"
         "说明：Gemini 的扩展思考（深度思考）开关只决定 AI 是否思考，思考内容会内联显示在"
         "回复里，无独立折叠 UI；需要让 AI 思考后回复，请在 ask_gemini_ai 的 think 参数控制。"
@@ -264,7 +266,7 @@ class GeminiSnapshotTool(_ToolBase):
 
     async def execute(
         self,
-        conversation: Annotated[str, "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截；'__new__' 开新对话"] = "",
+        conversation: Annotated[str, "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截（未命中报错）；'__new__' 开新对话"] = "",
         think: Annotated[str, "'auto'（默认）。Gemini 思考内容无独立折叠 UI，截图不展开/折叠思考"] = "auto",
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：定位会话并直接截图发送。
@@ -315,12 +317,12 @@ class GeminiShareTool(_ToolBase):
         "获取 Gemini 当前/指定对话的官方公开分享链接，不提问。"
         "适用于 Gemini 回复很长、想让对方直接看完整内容时，把链接发出去。"
         "conversation 控制取哪个会话：空（默认）取当前对话；传历史会话精确标题则"
-        "进入该会话再取（未命中则新建）。返回链接给模型，是否发送由你按场景决定。"
+        "进入该会话再取（未命中报错）。返回链接给模型，是否发送由你按场景决定。"
     )
 
     async def execute(
         self,
-        conversation: Annotated[str, "对话定位：空（默认）取当前对话；历史会话精确标题则进入该会话再取；'__new__' 开新对话"] = "",
+        conversation: Annotated[str, "对话定位：空（默认）取当前对话；历史会话精确标题则进入该会话再取（未命中报错）；'__new__' 开新对话"] = "",
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：获取当前/指定 Gemini 对话的分享链接。
 
