@@ -306,4 +306,4 @@ plugins/ai_ui_snapshot/
 
 ## 许可
 
-GPL-3.0，见 `LICENSE`。
+AGPL-3.0，见 `LICENSE`。
