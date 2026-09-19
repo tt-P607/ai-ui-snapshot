@@ -82,22 +82,22 @@
 
 ## 怎么跑起来
 
-### 1. 装
+### 1. 安装
 
-把 `plugins/ai_ui_snapshot/` 放到 Neo-MoFox 的 `plugins/` 下面，然后在项目根执行：
+- **市场安装**：在 Neo-MoFox WebUI 插件市场中搜索 `ai_ui_snapshot` 点击安装，或通过 CLI 安装。
+- **手动安装**：将 `ai_ui_snapshot` 文件夹放入 `plugins/` 目录。
+- **环境依赖**：
+  - 根目录执行 `uv sync` 同步依赖（包含 `playwright`）。
+  - 本插件优先复用系统已安装的官方 Google Chrome。如果系统没有 Chrome，在项目根执行一次 `uv run playwright install chromium` 下载无头浏览器内核。
 
-```bash
-uv sync
-```
+### 2. 配置
 
-### 2. 配
-
-改 `config/plugins/ai_ui_snapshot/config.toml`（第一次加载后会生成），先确认这几项：
+改 `config/plugins/ai_ui_snapshot/config.toml`（第一次加载后自动生成），确认这几项：
 
 ```toml
 [sites]
 deepseek = true          # 站点开关，不用就关
-gemini   = true          # 要代理，不用就关
+gemini   = false         # 走代理，不用就关
 doubao   = true
 
 [web]
@@ -116,28 +116,66 @@ timeout = 120            # 单张识图超时，秒
 
 ### 3. 登录 bot 账号
 
-每个站点登一次。脚本会用普通 Chrome 打开网页让你手动登：
+> **注意：执行登录前，请务必先停止正在运行的 Bot。**
+> 浏览器登录态目录（`data/ai_ui_snapshot_profile/`）在同一时间只能被一个 Chrome 实例独占。如果 Bot 开着，登录脚本会因目录被占用（exitCode=21）而无法正常启动。
+
+每个站点登一次。脚本会用普通 Chrome 打开网页让你手动登录：
 
 ```bash
 # 在哪个目录跑都行，脚本按自己的位置找项目根
 uv run python plugins/ai_ui_snapshot/scripts/login_deepseek.py
-uv run python plugins/ai_ui_snapshot/scripts/login_gemini.py
+uv run python plugins/ai_ui_snapshot/scripts/login_gemini.py      # 需确保代理已开启
 uv run python plugins/ai_ui_snapshot/scripts/login_doubao.py
 ```
 
-脚本会弹出浏览器，你在里面登录（想换账号就先在里面退出旧账号再登新的），登完把浏览器窗口关掉。脚本检测到窗口关了，会自己用无头方式验证一下登录态，顺手保存账号头像。
+脚本会弹出浏览器窗口，你在里面登录（想换账号就先在里面退出旧账号再登新的）。登录完成后**直接把浏览器窗口关掉**，脚本检测到窗口关闭后会自动用无头模式验证登录态并保存头像。
 
 ### 4. 确认能用
 
-```bash
-# 看看登录脚本和运行时用的目录是不是同一个、就绪判定认不认得出已登录（要先关 bot）
-uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
+登录完成后先别急着开 Bot，跑两条脚本确认环境：
 
-# 看看浏览器启动参数里有没有会被站点风控盯上的项（不联网）
+```bash
+# 1. 验证启动参数与反爬指纹（不联网，检查 Chrome 进程命令行是否干净）
 uv run python plugins/ai_ui_snapshot/scripts/verify_browser_flags.py
+
+# 2. 检查登录态目录与登录就绪状态（需先关 bot）
+uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 ```
 
-两个都过，重启 bot 就完事了。可以在聊天里发 `/ask 你好` 试一下，或者让 bot 调 `ask_deepseek`。
+两项检查通过后，即可启动 Bot（`uv run main.py`）。
+
+---
+
+## 怎么使用
+
+### 聊天命令 `/ask`
+
+用户可在聊天窗口直接向网页提问并获取仿真截图，方便快速测试与日常查看：
+
+```text
+/ask 为什么天空是蓝色的                  # 默认通过 DeepSeek 提问并截取长图
+/ask -db 用一句话介绍你自己              # 走豆包
+/ask -g 解释量子纠缠的基本原理            # 走 Gemini
+/ask -m deepseek-reasoner 详细分析该算法  # 指定模型/档位
+```
+
+### 给 Bot 配置人设提示词（可选）
+
+插件注册了一系列高层工具（`ask_deepseek`、`ask_doubao`、`gemini_generate_image` 等）。可以在 Bot 人设或 SystemPrompt 中加入简要指引，让 Bot 知道何时主动调用：
+
+```markdown
+- 当需要深度逻辑推理、联网求证最新时事或处理复杂问题时，你可以调用 `ask_deepseek` 或 `ask_doubao` 获取真实网页解答。
+- 当群友请求你画图、设计插画时，可以调用 `doubao_generate_image` 或 `gemini_generate_image` 生成图片。
+- 当你想把正在看的 AI 网页完整界面展示给群友时，可以调用 `deepseek_snapshot` 或 `doubao_snapshot` 发送长截图。
+```
+
+### 开启识图接管
+
+默认关闭。若希望群里收到的图片由真实网页生成文字描述：
+1. 确保在 `[sites]` 中开启了对应站点（如 `deepseek = true`）并已完成该站点登录；
+2. 在 `config.toml` 中设置 `[recognize] enabled = true`；
+3. 重启 Bot。当群聊出现图片时，Bot 会自动调用网页识图，识别结果回填给框架，框架内置的 VLM 不会重复调用；识别失败会自动回退至框架内置 VLM。
+4. 本地可通过 `uv run python plugins/ai_ui_snapshot/scripts/verify_recognize.py` 完整验证该链路。
 
 ## 配置
 
@@ -198,8 +236,6 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_browser_flags.py
 
 要关 bot 的原因：登录态就是同一个 `user_data_dir`，两个 Chrome 同时用会崩（exitCode=21）。
 
-还有一堆 `probe_*` 和 `diag_*` 脚本，是站点改版后校准选择器用的，会把页面结构 dump 出来看。平时不用管。
-
 ## 几个约定
 
 ### `conversation` 参数
@@ -224,6 +260,8 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_browser_flags.py
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| 登录脚本弹出的 Chrome 闪退 / 报错 exitCode=21 | Bot 正在运行，占用了相同的用户数据目录 | **先停止 Bot**，再运行登录脚本 |
+| 报错 `Executable doesn't exist` | 系统未安装 Chrome，也未下载 Playwright 内核 | 安装系统 Google Chrome，或执行 `uv run playwright install chromium` |
 | 报"登录态失效" | 站点把你蹬了 | 重跑对应的 `login_*.py` |
 | Gemini 全挂 | 代理没配或没开，或者登录态被风控清了 | 检查 `web.proxy_url`，重新登录 |
 | 豆包报"触发了人机验证" | 调得太频繁 | 手动在浏览器里过验证，然后降低频率 |
