@@ -1,10 +1,8 @@
-"""任务级临时浏览器会话管理器。
+"""按站点共享浏览器、按任务隔离页面的会话管理器。
 
-LLM 处理一个任务时临时打开一个 Playwright 浏览器（复用 bot 账号登录态），
-任务过程内按会话（stream_id）共享同一个页面，支持跨多次工具调用保持状态；
-任务结束（空闲超时无活动）自动关闭，插件卸载时全部关闭，不常驻占用资源。
-站点（deepseek/gemini 等）通过 ``theme`` 参数路由到各自的登录态 profile
-与默认 URL，会话以 (theme, stream_id) 隔离。
+每个站点只启动一个复用登录态的 persistent context，任务会话按
+``(theme, stream_id)`` 各自持有独立页面。任务空闲超时只关闭对应页面，
+不会影响同站点的其他对话；插件卸载时统一关闭站点浏览器。
 """
 
 from __future__ import annotations
@@ -201,9 +199,10 @@ class BrowserSession:
 
     Attributes:
         stream_id: 关联的聊天流 ID。
-        context: Playwright 浏览器上下文。
-        playwright: Playwright 实例（关闭时 stop）。
+        context: 站点共享的 Playwright 浏览器上下文。
+        playwright: 站点共享的 Playwright 实例。
         page: 当前页面对象（可能为 None）。
+        pages: 该任务为不同对话保留的全部页面。
         last_active: 最后活动时间戳（epoch 秒）。
         busy: 当前处于活跃操作（提问/等待回复）的计数，大于 0 时空闲清理跳过。
         active_conversation: 当前活跃对话的稳定 ID（URL 中的会话 UUID）。
@@ -214,6 +213,7 @@ class BrowserSession:
     context: Any
     playwright: Any = None
     page: Any = None
+    pages: list[Any] = field(default_factory=list)
     last_active: float = field(default_factory=time.time)
     busy: int = 0
     active_conversation: str = ""
@@ -244,11 +244,19 @@ class BrowserSession:
             self.active_conversation_title = title
 
 
+@dataclass
+class SiteBrowser:
+    """单个站点共享的浏览器运行时。"""
+
+    context: Any
+    playwright: Any
+
+
 class BrowserSessionManager:
-    """按 stream_id 管理任务级临时浏览器会话。
+    """按站点共享浏览器并按 stream_id 管理独立页面。
 
     用法：进程内单例。``get(stream_id, theme)`` 取或建会话；``touch(stream_id)``
-    刷新活动时间；后台任务定期关闭空闲会话；``close_all`` 关闭全部。
+    刷新活动时间；后台任务定期关闭空闲页面；``close_all`` 关闭全部。
     站点主题（deepseek/gemini/doubao）决定登录态 profile 目录与默认 URL。
     """
 
@@ -306,8 +314,9 @@ class BrowserSessionManager:
         self._decoration_theme = decoration_theme
         self._decoration_avatar_url = resolve_local_avatar(decoration_avatar_url, self._profile_root)
         self._sessions: dict[str, BrowserSession] = {}
-        # 按 session_key 的创建互斥锁：同一会话首次并发获取时只启动一个浏览器，
-        # 避免多个 Chrome 实例争用同一 profile 崩溃（exitCode=21）
+        self._site_browsers: dict[str, SiteBrowser] = {}
+        self._site_create_locks: dict[str, asyncio.Lock] = {}
+        # 同一会话首次并发获取时只创建一个页面。
         self._create_locks: dict[str, asyncio.Lock] = {}
         self._cleanup_task: asyncio.Task | None = None
 
@@ -379,13 +388,14 @@ class BrowserSessionManager:
         await self._close_by_key(key)
 
     async def close_all_theme(self, theme: str) -> None:
-        """关闭指定站点的全部会话。
+        """关闭指定站点的全部页面与浏览器。
 
         Args:
             theme: 站点主题（deepseek/gemini/doubao）。
         """
         for key in [k for k in list(self._sessions) if k.startswith(f"{theme}:")]:
             await self._close_by_key(key)
+        await self._close_site_browser(theme)
 
     def _site_url(self, theme: str) -> str:
         """按站点主题返回默认网址（站点地址由映射决定，不暴露配置）。
@@ -417,8 +427,8 @@ class BrowserSessionManager:
     async def get(self, stream_id: str, theme: str = "") -> BrowserSession:
         """获取（或创建）指定会话的浏览器会话。
 
-        按站点主题路由：不同主题（deepseek/gemini/doubao）使用各自的登录态
-        profile 与默认 URL，会话以 (theme, stream_id) 隔离，避免站点串会话。
+        不同站点使用各自的登录态 profile 与共享浏览器；每个 stream 使用
+        独立页面，避免切换或关闭一个对话影响同站点的其他任务。
 
         Args:
             stream_id: 聊天流 ID。
@@ -448,59 +458,141 @@ class BrowserSessionManager:
             if session is not None:
                 session.touch()
                 return session
+            site_browser = await self._get_site_browser(theme)
+            page = await site_browser.context.new_page()
             try:
-                from playwright.async_api import async_playwright
-            except ImportError as exc:  # pragma: no cover - 依赖缺失时
-                raise RuntimeError("Playwright 未安装，插件启动时会自动安装") from exc
-
-            profile_dir = self._profile_root / theme
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            url = self._site_url(theme)
-            p = await async_playwright().start()
-            # 指定站点可强制有头（forced_headful_themes 非空时）；默认全部无头
-            headful = theme in self._forced_headful_themes
-            headless_now = False if headful else self._headless
-            launch_kwargs: dict[str, Any] = {
-                "user_data_dir": str(profile_dir),
-                "headless": headless_now,
-                "viewport": self.viewport,
-                "device_scale_factor": self._device_scale_factor,
-                "permissions": ["clipboard-read", "clipboard-write"],
-            }
-            # 自动化相关参数与登录脚本同源，避免两处不一致触发站点风控
-            launch_kwargs.update(launch_flags())
-            # 优先使用配置的浏览器路径；未配置时自动探测正式版 Chrome
-            # （Playwright 自带 Chromium 的自动化指纹会被 Google 风控判定并登出）
-            browser_path = resolve_browser_path(self._browser_path)
-            if headless_now and browser_path:
-                # 无头启动前替换掉 UA 中的无头标识，避免站点风控识别（详见函数文档）
-                real_ua = await _resolve_real_user_agent(browser_path)
-                if real_ua:
-                    launch_kwargs["user_agent"] = real_ua
-            if browser_path:
-                launch_kwargs["executable_path"] = browser_path
-            if self._proxy_url:
-                launch_kwargs["proxy"] = {"server": self._proxy_url}
-            try:
-                context = await p.chromium.launch_persistent_context(**launch_kwargs)
+                await page.goto(
+                    self._site_url(theme), wait_until="domcontentloaded", timeout=60000
+                )
+                await page.wait_for_timeout(3000)
             except Exception:
-                # 启动失败时释放 playwright 实例，避免资源泄漏后重试
-                try:
-                    await p.stop()
-                except Exception:  # noqa: BLE001 - 关闭失败不掩盖原异常
-                    pass
+                await page.close()
                 raise
-            page = context.pages[0] if context.pages else await context.new_page()
-            if browser_path:
-                await page.add_init_script(STEALTH_INIT_SCRIPT)
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(3000)
-
-            session = BrowserSession(stream_id=stream_id, context=context, playwright=p, page=page)
+            session = BrowserSession(
+                stream_id=stream_id,
+                context=site_browser.context,
+                playwright=site_browser.playwright,
+                page=page,
+                pages=[page],
+            )
             self._sessions[session_key] = session
             self._ensure_cleanup_task()
-            logger.info(f"浏览器会话已创建（theme={theme}, stream={stream_id}）")
+            logger.info(f"浏览器页面已创建（theme={theme}, stream={stream_id}）")
             return session
+
+    async def new_session_page(self, stream_id: str, theme: str = "") -> BrowserSession:
+        """为已有任务会话新建页面，并保留原页面。
+
+        Args:
+            stream_id: 聊天流 ID。
+            theme: 站点主题；空用默认主题。
+
+        Returns:
+            BrowserSession: 已切换到新页面的任务会话。
+        """
+        theme = theme or self._theme
+        session = await self.get(stream_id, theme)
+        page = await session.context.new_page()
+        try:
+            await page.goto(
+                self._site_url(theme), wait_until="domcontentloaded", timeout=60000
+            )
+            await page.wait_for_timeout(3000)
+        except Exception:
+            await page.close()
+            raise
+        session.page = page
+        session.pages.append(page)
+        session.active_conversation = ""
+        session.active_conversation_title = ""
+        session.touch()
+        logger.info(f"新对话页面已创建（theme={theme}, stream={stream_id}）")
+        return session
+
+    async def open_page(self, theme: str, url: str = "") -> Any:
+        """在站点共享浏览器中创建临时独立页面。
+
+        Args:
+            theme: 站点主题。
+            url: 可选目标地址；为空时不导航。
+
+        Returns:
+            Any: 新创建的 Playwright 页面。
+        """
+        site_browser = await self._get_site_browser(theme)
+        page = await site_browser.context.new_page()
+        if url:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                await page.close()
+                raise
+        return page
+
+    async def close_page(self, page: Any) -> None:
+        """关闭一个临时页面，不影响同站点其他页面。"""
+        try:
+            if page is not None and not page.is_closed():
+                await page.close()
+        except Exception:  # noqa: BLE001 - 页面可能已被站点主动关闭
+            pass
+
+    async def _get_site_browser(self, theme: str) -> SiteBrowser:
+        """获取或创建指定站点唯一的 persistent context。"""
+        site_browser = self._site_browsers.get(theme)
+        if site_browser is not None:
+            return site_browser
+        lock = self._site_create_locks.setdefault(theme, asyncio.Lock())
+        async with lock:
+            site_browser = self._site_browsers.get(theme)
+            if site_browser is not None:
+                return site_browser
+            site_browser = await self._launch_site_browser(theme)
+            self._site_browsers[theme] = site_browser
+            logger.info(f"站点共享浏览器已创建（theme={theme}）")
+            return site_browser
+
+    async def _launch_site_browser(self, theme: str) -> SiteBrowser:
+        """启动指定站点的 persistent context。"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:  # pragma: no cover - 依赖缺失时
+            raise RuntimeError("Playwright 未安装，插件启动时会自动安装") from exc
+
+        profile_dir = self._profile_root / theme
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        playwright = await async_playwright().start()
+        headful = theme in self._forced_headful_themes
+        headless_now = False if headful else self._headless
+        launch_kwargs: dict[str, Any] = {
+            "user_data_dir": str(profile_dir),
+            "headless": headless_now,
+            "viewport": self.viewport,
+            "device_scale_factor": self._device_scale_factor,
+            "permissions": ["clipboard-read", "clipboard-write"],
+        }
+        launch_kwargs.update(launch_flags())
+        browser_path = resolve_browser_path(self._browser_path)
+        if headless_now and browser_path:
+            real_ua = await _resolve_real_user_agent(browser_path)
+            if real_ua:
+                launch_kwargs["user_agent"] = real_ua
+        if browser_path:
+            launch_kwargs["executable_path"] = browser_path
+        if self._proxy_url:
+            launch_kwargs["proxy"] = {"server": self._proxy_url}
+        try:
+            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+            if browser_path:
+                await context.add_init_script(STEALTH_INIT_SCRIPT)
+            # 保留 persistent context 自动创建的空白页作为保活页；业务始终使用新页面。
+            return SiteBrowser(context=context, playwright=playwright)
+        except Exception:
+            try:
+                await playwright.stop()
+            except Exception:  # noqa: BLE001 - 关闭失败不掩盖原异常
+                pass
+            raise
 
     def touch(self, stream_id: str, theme: str = "") -> None:
         """刷新会话活动时间。
@@ -538,7 +630,7 @@ class BrowserSessionManager:
         await self._close_by_key(self._key(stream_id, theme))
 
     async def _close_by_key(self, key: str) -> None:
-        """按存储键关闭会话（关闭异常静默忽略）。
+        """按存储键关闭会话页面（不关闭站点共享浏览器）。
 
         Args:
             key: 会话存储键（theme:stream_id）。
@@ -546,21 +638,36 @@ class BrowserSessionManager:
         session = self._sessions.pop(key, None)
         if session is None:
             return
+        pages = session.pages or ([session.page] if session.page is not None else [])
+        for page in dict.fromkeys(pages):
+            try:
+                if not page.is_closed():
+                    await page.close()
+            except Exception:  # noqa: BLE001 - 页面可能已被站点主动关闭
+                pass
+        logger.info(f"浏览器页面已关闭（{key}）")
+
+    async def _close_site_browser(self, theme: str) -> None:
+        """关闭指定站点共享浏览器。"""
+        site_browser = self._site_browsers.pop(theme, None)
+        if site_browser is None:
+            return
         try:
-            await session.context.close()
+            await site_browser.context.close()
         except Exception:  # noqa: BLE001 - 关闭异常忽略
             pass
         try:
-            if session.playwright is not None:
-                await session.playwright.stop()
+            await site_browser.playwright.stop()
         except Exception:  # noqa: BLE001 - 停止异常忽略
             pass
-        logger.info(f"浏览器会话已关闭（{key}）")
+        logger.info(f"站点共享浏览器已关闭（{theme}）")
 
     async def close_all(self) -> None:
         """关闭所有会话（插件卸载时调用）。"""
         for key in list(self._sessions):
             await self._close_by_key(key)
+        for theme in list(self._site_browsers):
+            await self._close_site_browser(theme)
         if self._cleanup_task:
             self._cleanup_task.cancel()
             self._cleanup_task = None

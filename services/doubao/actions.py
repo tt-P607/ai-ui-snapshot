@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
@@ -487,19 +488,185 @@ class DoubaoActions(PageActions):
             await _aio.sleep(0.4)
         return False
 
-    async def screenshot(self, region: str = "conversation") -> list[str]:
+    async def screenshot(
+        self,
+        region: str = "conversation",
+        scope: str = "viewport",
+        rounds: int = 1,
+    ) -> list[str]:
         """截取豆包对话区为 data URI 列表（超长分片）。
 
-        豆包为虚拟列表（仅渲染可见行），无法整页撑开长截图：改用基类
-        整页截图（当前视口全页），不尝试展开全部历史。region=full 同义。
+        豆包为虚拟列表（仅渲染可见行）：
+        - scope="viewport"（默认）：截取当前人类可读的正常视口窗口（比例自然，聚焦最新回复）；
+        - scope="rounds"：从后往前倒序完整截取最近 rounds 个回复及提问；
+        - scope="full"：整页长截图。
 
         Args:
-            region: conversation（默认）/ full（二者等价，均整页截图）。
+            region: conversation（默认）/ full。
+            scope: 截图范围模式（viewport / rounds / full）。
+            rounds: 当 scope="rounds" 时指定的回复轮数（默认 1）。
 
         Returns:
             list[str]: PNG data URI 列表；失败返回空列表。
         """
-        return await self._fullpage_shots()
+        if scope == "rounds" or rounds > 1:
+            return await self._rounds_shot(rounds=rounds)
+        if scope == "full":
+            return await self._tall_viewport_shot()
+        # 默认正常视口比例截图（滚动至最新回复）
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const rows = document.querySelectorAll('[class*="v_list_row"]');
+                    if (rows.length) {
+                        rows[rows.length - 1].scrollIntoView({ block: 'end' });
+                    }
+                }"""
+            )
+            await self._page.wait_for_timeout(300)
+        except Exception:  # noqa: BLE001
+            pass
+        return await self._viewport_shot()
+
+    async def _tall_viewport_shot(self) -> list[str]:
+        """用超高虚拟视口一次性渲染并截取完整豆包页面。
+
+        豆包的对话与历史栏都是随视口高度伸展的虚拟列表。临时增高
+        Playwright 视口后，左右列表会在同一个页面布局中同步展开，固定的
+        输入区和账号区也会自然落在页面底部，无需滚动采片或图像拼接。
+
+        Returns:
+            list[str]: 单张 PNG data URI 列表。
+        """
+        marker = "data-ai-ui-snapshot-scroll"
+        original_viewport = self._page.viewport_size
+        original_tops = {"conversation": 0, "sidebar": 0}
+        try:
+            if not original_viewport:
+                return await self._viewport_shot()
+            info = await self._page.evaluate(
+                """(attr) => {
+                    document.querySelectorAll(`[${attr}]`).forEach(el => el.removeAttribute(attr));
+                    const candidates = Array.from(
+                        document.querySelectorAll('[class*="v_list_scroller"]')
+                    ).filter(el => {
+                        const rect = el.getBoundingClientRect();
+                        return el.clientHeight >= 200
+                            && rect.width >= Math.max(480, window.innerWidth * 0.45)
+                            && el.querySelector('[class*="v_list_row"]');
+                    });
+                    if (!candidates.length) return null;
+                    const score = (el) => {
+                        const messages = el.querySelectorAll(
+                            '[class*="md-box-root"], [class*="send-msg-bubble"], [class*="v_list_row"]'
+                        ).length;
+                        return messages * 1000000 + el.scrollHeight - el.clientHeight;
+                    };
+                    const target = candidates.sort((a, b) => score(b) - score(a))[0];
+                    target.setAttribute(attr, 'conversation');
+                    const rect = target.getBoundingClientRect();
+                    const sidebar = Array.from(document.querySelectorAll('*'))
+                        .filter(el => {
+                            const style = getComputedStyle(el);
+                            const candidateRect = el.getBoundingClientRect();
+                            return ['auto', 'scroll'].includes(style.overflowY)
+                                && el.scrollHeight > el.clientHeight + 20
+                                && el.clientHeight >= 200
+                                && candidateRect.width >= 180
+                                && candidateRect.right <= rect.left + 4;
+                        })
+                        .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0];
+                    if (sidebar) sidebar.setAttribute(attr, 'sidebar');
+                    const sidebarRect = sidebar ? sidebar.getBoundingClientRect() : null;
+                    return {
+                        contentTop: Math.max(0, rect.top),
+                        contentHeight: target.scrollHeight,
+                        footerHeight: Math.max(0, window.innerHeight - rect.bottom),
+                        conversationTop: target.scrollTop,
+                        sidebarTop: sidebar && sidebarRect ? sidebar.scrollTop : 0,
+                    };
+                }""",
+                marker,
+            )
+            if not info:
+                logger.warning("未找到豆包对话滚动容器，回退视窗截图")
+                return await self._viewport_shot()
+
+            original_tops = {
+                "conversation": int(info["conversationTop"]),
+                "sidebar": int(info["sidebarTop"]),
+            }
+            target_height = math.ceil(
+                float(info["contentTop"])
+                + float(info["contentHeight"])
+                + float(info["footerHeight"])
+            )
+            target_height = min(
+                self._max_screenshot_height,
+                max(int(original_viewport["height"]), target_height),
+            )
+            await self._page.set_viewport_size(
+                {"width": int(original_viewport["width"]), "height": target_height}
+            )
+            await self._page.evaluate(
+                """(attr) => {
+                    const conversation = document.querySelector(`[${attr}="conversation"]`);
+                    const sidebar = document.querySelector(`[${attr}="sidebar"]`);
+                    if (conversation) conversation.scrollTop = 0;
+                    if (sidebar) sidebar.scrollTop = 0;
+                }""",
+                marker,
+            )
+            await self._page.wait_for_timeout(800)
+            return await self._viewport_shot()
+        except Exception as exc:  # noqa: BLE001 - 站点 DOM 变化时回退
+            logger.warning(f"豆包超高视口长截图失败，回退视窗截图: {exc}")
+            return await self._viewport_shot()
+        finally:
+            try:
+                if original_viewport:
+                    await self._page.set_viewport_size(original_viewport)
+                    await self._page.wait_for_timeout(100)
+                await self._page.evaluate(
+                    """([attr, tops]) => {
+                        const conversation = document.querySelector(`[${attr}="conversation"]`);
+                        const sidebar = document.querySelector(`[${attr}="sidebar"]`);
+                        if (conversation) conversation.scrollTop = tops.conversation;
+                        if (sidebar) sidebar.scrollTop = tops.sidebar;
+                        document.querySelectorAll(`[${attr}]`).forEach(el => el.removeAttribute(attr));
+                    }""",
+                    [marker, original_tops],
+                )
+            except Exception:  # noqa: BLE001 - 页面关闭时无需恢复
+                pass
+
+    async def extract_chat_images(self) -> list[str]:
+        """探测当前最新一条 AI 回复中是否存在模型生成的图片，返回直链列表。
+
+        Returns:
+            list[str]: 图片 CDN 直链列表；无生成图片时返回空列表。
+        """
+        try:
+            urls = await self._page.evaluate(
+                """() => {
+                    const realSrc = (im) => im.currentSrc || im.src || '';
+                    const rows = Array.from(document.querySelectorAll('[class*="v_list_row"]'));
+                    const tailRows = rows.slice(-3);
+                    const imgs = [];
+                    tailRows.forEach(r => {
+                        Array.from(r.querySelectorAll('img')).forEach(im => {
+                            const src = realSrc(im);
+                            if (im.complete && /^https?:/.test(src) && (src.includes('rc_gen_image') || im.naturalWidth >= 300)) {
+                                imgs.push(src);
+                            }
+                        });
+                    });
+                    return Array.from(new Set(imgs));
+                }"""
+            )
+            return [str(u) for u in (urls or []) if str(u).startswith("http")]
+        except Exception:  # noqa: BLE001
+            return []
 
     # ------------------------------------------------------------------
     # 技能：图像生成 / 视频生成（probe5 实测）

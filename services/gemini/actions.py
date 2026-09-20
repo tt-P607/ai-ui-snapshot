@@ -8,14 +8,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import pathlib
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
 
 from ..base.page_actions import PageActions
-from ..base.utils import data_uri, normalize_theme, resolve_auto_theme
+from ..base.utils import normalize_theme, resolve_auto_theme
 from .constants import (
     ACTIVE_CONVERSATION_ID_SCRIPT,
     ACTIVE_CONVERSATION_TITLE_SCRIPT,
@@ -565,7 +564,7 @@ class GeminiActions(PageActions):
         """
         page = self._page
         try:
-            dl_locator = page.locator(DOWNLOAD_IMAGE_BUTTON).first
+            dl_locator = page.locator(DOWNLOAD_IMAGE_BUTTON).last
             if await dl_locator.count() == 0:
                 return None
             save_path = pathlib.Path(save_dir)
@@ -580,8 +579,15 @@ class GeminiActions(PageActions):
             logger.warning(f"下载 Gemini 生成图片失败: {exc}")
             return None
 
+    async def generated_image_count(self) -> int:
+        """返回当前对话中可下载的生成图片数量。"""
+        try:
+            return int(await self._page.locator(DOWNLOAD_IMAGE_BUTTON).count())
+        except Exception:  # noqa: BLE001 - 页面切换期间按无图片处理
+            return 0
+
     async def try_download_generated_image(
-        self, save_dir: str, wait_s: int = 30
+        self, save_dir: str, wait_s: int = 30, previous_count: int = 0
     ) -> str | None:
         """短轮询检测对话中是否生成了图片，有则下载（供 ask_gemini 用）。
 
@@ -592,6 +598,7 @@ class GeminiActions(PageActions):
         Args:
             save_dir: 保存目录（自动创建）。
             wait_s: 等待生成图出现的最大秒数。
+            previous_count: 提问前已有的可下载图片数量。
 
         Returns:
             str | None: 保存的本地路径；未生成图或下载失败返回 None。
@@ -599,7 +606,7 @@ class GeminiActions(PageActions):
         deadline = asyncio.get_running_loop().time() + wait_s
         while asyncio.get_running_loop().time() < deadline:
             try:
-                if bool(await self._page.evaluate(IMAGE_GENERATED_SCRIPT)):
+                if await self.generated_image_count() > previous_count:
                     path = await self.download_generated_image(save_dir)
                     return path
             except Exception:  # noqa: BLE001 - 检测失败不阻塞
@@ -662,93 +669,55 @@ class GeminiActions(PageActions):
     # 长截图
     # ------------------------------------------------------------------
 
-    async def screenshot(self, region: str = "conversation", think: str = "auto") -> list[str]:
-        """截取整页为单张长截图 data URI（含侧边栏，无重复拼接）。
+    async def screenshot(
+        self,
+        region: str = "conversation",
+        think: str = "auto",
+        scope: str = "viewport",
+        rounds: int = 1,
+    ) -> list[str]:
+        """截取 Gemini 对话为 data URI 列表。
 
-        Gemini 为固定视口布局：``html`` 的 ``overflow:hidden`` 将整页
-        ``scrollHeight`` 锁死为视口高度。方案（与 DeepSeek 一致）：
-        先把中间滚动链高度赋为完整对话内容高度并放开 html/body overflow，
-        使整页高度跟随内容增长，再 ``full_page`` 截出含侧边栏的单张真长图，
-        截完还原。若撑开失败（如无内容容器）回退元素级截图。
+        - scope="viewport"（默认）：截取正常视窗窗口（比例自然，人类可读）；
+        - scope="rounds"：从后往前倒序完整截取最近 rounds 个回复及提问；
+        - scope="full"：撑开整页长截图。
 
         Args:
-            region: conversation（对话区，默认）/ full（整页，等价对话区）。
-            think: 扩展思考开关（auto 不修改；开启/关闭由提问侧 ``set_thinking``
-                控制 AI 是否思考）。Gemini 的思考内容无独立折叠 UI，截图不处理展开。
+            region: conversation / full。
+            think: 扩展思考开关。
+            scope: 截图范围模式（viewport / rounds / full）。
+            rounds: 当 scope="rounds" 时截取的回复轮数。
 
         Returns:
-            list[str]: PNG data URI 列表；失败返回空列表。
+            list[str]: PNG data URI 列表。
         """
         page = self._page
-        # 截图前自动应用页面主题（auto 按本地时间白天/夜间切换）
         await self.set_theme()
         await page.wait_for_timeout(300)
-        # 撑开整页 → full_page 单张真长截图；失败回退元素级分片
-        saved = None
-        try:
-            result = await page.evaluate(GEMINI_FULLPAGE_EXPAND_SCRIPT)
-            saved = result.get("saved") if isinstance(result, dict) else None
-            await page.wait_for_timeout(400)
-        except Exception:  # noqa: BLE001 - 撑开失败
-            saved = None
-        if saved:
-            try:
-                shots = await self._fullpage_shots()
-            except Exception:  # noqa: BLE001 - 整页截图失败
-                shots = []
-            if not shots:
-                shots = await self._scroll_paged_shots()
-        else:
-            shots = await self._scroll_paged_shots()
-        # 还原撑开样式
-        if saved:
-            try:
-                await page.evaluate(RESTORE_SCRIPT, {"saved": saved})
-            except Exception:  # noqa: BLE001 - 还原失败不阻塞
-                pass
-        # 首张截图顶部拼接浏览器外壳顶栏（标签页/地址栏/头像），与 DeepSeek 一致
-        if shots:
-            banner = await self._capture_chrome_banner(self._page.viewport_size["width"] if self._page.viewport_size else 1440)
-            if banner:
-                shots[0] = data_uri(self._prepend_chrome_banner(base64.b64decode(shots[0].split(",", 1)[1]), banner))
-        return shots
 
-    async def _fullpage_shots(self) -> list[str]:
-        """整页 full_page 截图（撑开后 docH=内容高度）；超高分片兜底。
+        if scope == "rounds" or rounds > 1:
+            return await self._rounds_shot(rounds=rounds)
 
-        Returns:
-            list[str]: 单张（或超高分片）PNG data URI 列表；失败返回空列表。
-        """
-        try:
-            height = int(
-                await self._page.evaluate("() => document.documentElement.scrollHeight") or 0
-            )
-            if height <= 0:
-                return []
-            if height <= self._max_screenshot_height:
-                data = await self._page.screenshot(type="png", full_page=True)
-                return [data_uri(data)] if data else []
-            # 超高分片：按 max_screenshot_height 逐段截取（每段整页宽度含侧边栏）
-            doc_width = int(
-                await self._page.evaluate("() => document.documentElement.scrollWidth") or 0
-            )
-            width = doc_width or 1440
-            pieces: list[bytes] = []
-            offset = 0
-            while offset < height:
-                piece_h = min(self._max_screenshot_height, height - offset)
-                buf = await self._page.screenshot(
-                    type="png", full_page=True,
-                    clip={"x": 0, "y": offset, "width": width, "height": piece_h},
+        if scope == "full":
+            try:
+                shots = await self._expanded_fullpage_shots(
+                    GEMINI_FULLPAGE_EXPAND_SCRIPT,
+                    RESTORE_SCRIPT,
+                    saved_key="saved",
+                    require_saved=True,
+                    wait_ms=400,
                 )
-                pieces.append(buf)
-                offset += piece_h
-            if not pieces:
-                return []
-            return [data_uri(p) for p in pieces]
-        except Exception as exc:  # noqa: BLE001 - 截图失败
-            logger.warning(f"整页截图失败：{exc}")
-            return []
+            except Exception:  # noqa: BLE001
+                shots = []
+            return shots or await self._scroll_paged_shots()
+
+        # 默认正常视窗截图
+        try:
+            await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(200)
+        except Exception:  # noqa: BLE001
+            pass
+        return await self._viewport_shot()
 
     async def _scroll_paged_shots(self) -> list[str]:
         """对对话滚动容器滚动分片截图并拼接为长图（整页撑开的兜底）。
@@ -839,9 +808,12 @@ class GeminiActions(PageActions):
             if not pieces:
                 logger.warning("截图失败：未截取到任何分片")
                 return []
-            if len(pieces) == 1:
-                return [data_uri(pieces[0])]
-            return [data_uri(self._vstack_png(pieces))]
+            combined = pieces[0] if len(pieces) == 1 else self._vstack_png(pieces)
+            viewport = self._page.viewport_size or {"width": 1440}
+            return await self._encode_png_pieces(
+                [combined],
+                width=int(viewport["width"]),
+            )
         except Exception as exc:  # noqa: BLE001 - 截图失败
             logger.warning(f"截图失败：{exc}")
             return []

@@ -11,7 +11,7 @@
 | 工具 | 用途 |
 |---|---|
 | `ask_deepseek` | 提问，返回回复文本。可以带图片或文件，可以控制深度思考和联网搜索开关 |
-| `deepseek_snapshot` | 截当前对话（或指定对话）的长图发出去，不提问 |
+| `deepseek_snapshot` | 截取当前对话界面发出去（默认正常视窗，支持 rounds 倒序截取），不提问 |
 | `deepseek_share` | 拿当前对话的官方分享链接，不提问 |
 | `deepseek_history` | 列历史会话，或者进某个会话接着聊 |
 | `deepseek_state` | 看当前在哪个对话、开关是什么状态 |
@@ -20,9 +20,10 @@
 
 | 工具 | 用途 |
 |---|---|
-| `ask_gemini_ai` | 提问，全模态，图片/语音/视频/文档都能带 |
-| `gemini_generate_image` | 让 Gemini 生图，可以带参考图改图，出图自动发到聊天 |
-| `gemini_snapshot` | 截长图发出去 |
+| `ask_gemini_ai` | 提问或在指定对话中按上下文生图，全模态，图片/语音/视频/文档都能带 |
+| `gemini_generate_image` | 在独立新对话中生图，可以带参考图改图，出图自动发到聊天 |
+| `gemini_download_image` | 下载并发送当前/指定对话中已有的最近一张生成图 |
+| `gemini_snapshot` | 截取对话界面发出去（默认人类可读正常视窗，支持 rounds 倒序截取） |
 | `gemini_share` | 拿官方分享链接 |
 
 模型名传族关键词就行：`Flash-Lite`、`Flash`、`Pro`。插件按关键词去菜单里找当前版本，站点换了版本号也不会失效。
@@ -31,11 +32,12 @@
 
 | 工具 | 用途 |
 |---|---|
-| `ask_doubao` | 提问。多张图可以一次传进去问，同一个对话里可以连续追问 |
-| `doubao_snapshot` | 截长图发出去 |
+| `ask_doubao` | 提问或在指定对话中按上下文生图。多张图可一次传入，生成图自动下载并分析 |
+| `doubao_snapshot` | 截取对话界面发出去（默认人类可读正常视窗，支持 rounds 倒序截取） |
 | `doubao_history` | 列历史会话，或者进某个会话接着聊 |
 | `doubao_state` | 看当前档位（快速/专家） |
-| `doubao_generate_image` | 用豆包的生图技能出图，可以带参考图做图生图 |
+| `doubao_generate_image` | 在独立新对话中用豆包生图，可以带参考图做图生图 |
+| `doubao_download_images` | 下载并发送当前/指定对话末尾已有的全部候选生成图 |
 | `doubao_generate_video` | 提交视频生成任务，立刻返回，后台等着。生成完会唤醒 bot，由 bot 决定发不发 |
 | `doubao_send_video` | 把生成完的视频发到聊天 |
 
@@ -59,7 +61,7 @@
 
 - `/ask` 命令：手动驱动网页提问并截图。`-g` 走 Gemini，`-db` 走豆包，`-m` 指定模型或档位
 - `reset_browser`：网页卡死或崩溃时重建浏览器。登录态和云端历史都还在
-- 所有对话类工具都有 `conversation` 参数：留空接着当前对话，填标题进指定会话，填 `__new__` 强制开新对话
+- 所有对话类工具都有 `conversation` 参数：【持续对话规则】：如果要在同一对话中持续交谈，必须显式传入该对话标题（来自上次返回的 `conversation`）；若不传该参数（留空），系统会自动为你开启全新对话，防止不同话题相互污染串台！
 
 ## 装之前先确认这些
 
@@ -106,6 +108,9 @@ headless  = true                      # 无人值守就 true
 
 [screenshot]
 browser_path = ""        # 留空自动找系统 Chrome，也可以写绝对路径
+
+[vision]
+multimodal = false       # 对话中生图的感知开关。默认关（走框架内置 VLM 提炼文字描述回填，安全省 Token）；当确认 Bot 主模型为多模态模型时可手动开启，开启后直接传 Base64 供看图
 
 [recognize]
 enabled = false          # 接管框架识图。开启后每张图通过真实网页识别
@@ -165,7 +170,8 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 
 ```markdown
 - 当需要深度逻辑推理、联网求证最新时事或处理复杂问题时，你可以调用 `ask_deepseek` 或 `ask_doubao` 获取真实网页解答。
-- 当群友请求你画图、设计插画时，可以调用 `doubao_generate_image` 或 `gemini_generate_image` 生成图片。
+- 当画图请求依赖当前对话、上一张图或既有上下文时，继续调用 `ask_doubao` / `ask_gemini_ai` 并显式传入该对话标题；完全独立的创作才调用 `doubao_generate_image` / `gemini_generate_image`。
+- 对话中的图片已经生成但需要补下载或重新发送时，调用 `doubao_download_images` / `gemini_download_image`，不会新建对话或重新生成。
 - 当你想把正在看的 AI 网页完整界面展示给群友时，可以调用 `deepseek_snapshot` 或 `doubao_snapshot` 发送长截图。
 ```
 
@@ -198,6 +204,7 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 | | `device_scale_factor` | `2` | 高清倍率 |
 | | `max_height` | `8000` | 长截图单张最高多少像素，超了就切片 |
 | | `browser_path` | `""` | Chrome 路径，留空自动找 |
+| `[vision]` | `multimodal` | `false` | 多模态看图开关。默认关（走框架内置 VLM 提炼文字描述回填，安全省 Token）；当确认主模型为多模态模型时可手动开启，直接传 Base64 |
 | `[upload]` | `enabled` / `max_size_mb` | `true` / `50` | 附件上传开关和大小上限 |
 | `[recognize]` | `enabled` | `false` | 要不要接管框架识图。开启后每张图会通过真实网页识别一次 |
 | | `site` | `deepseek` | 用哪个站点，得在 `[sites]` 里也开着 |

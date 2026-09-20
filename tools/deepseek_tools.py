@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
@@ -43,10 +43,10 @@ class AskAiAndSnapshotTool(_ToolBase):
         "（把 DeepSeek 当外部信息源，需要联网时开启 search）。"
         "可指定深度思考/联网搜索开关、附带图片（media_id）或已下载文件（file_name）"
         "一起提问、信息返回范围（last 最新回复 / full 整段对话）。"
-        "conversation 参数控制对话定位：空（默认）沿用当前对话；传历史会话精确标题则"
-        "进入该会话继续（标题用 deepseek_history list 获取；未命中则新建）；"
-        "传 __new__ 强制开新对话。每次调用都会返回当前对话标题（conversation 字段），"
-        "记住它可回到同一对话。深度思考与智能搜索默认开启。"
+        "conversation 参数控制对话定位：【持续对话规则】：若要在同一对话中持续交谈，"
+        "必须显式传入该对话的精确标题（取自上次调用返回的 conversation 字段）；"
+        "若不传该参数（留空），系统会自动开启一个全新对话，避免不同话题串台！"
+        "深度思考与智能搜索默认开启。"
         "需要展示 DeepSeek 原始界面或长回复时，另用 deepseek_snapshot 截图、"
         "deepseek_share 取分享链接。"
     )
@@ -57,7 +57,7 @@ class AskAiAndSnapshotTool(_ToolBase):
         deepthink: Annotated[bool | None, "是否开启深度思考：true/false，默认 true"] = True,
         search: Annotated[bool | None, "是否开启联网搜索：true/false，默认 true"] = True,
         new_chat: Annotated[bool, "是否先开一个新对话再提问（等价 conversation=__new__）"] = False,
-        conversation: Annotated[str, "对话定位：空（默认）沿用当前对话；历史会话精确标题则进入继续（用 deepseek_history list 获取标题，未命中则新建）；'__new__' 强制开新对话"] = "",
+        conversation: Annotated[str, "对话定位：留空（默认）自动创建全新对话！若要在同一对话中持续聊，必须显式传入上次返回的 conversation 标题"] = "",
         image_id: Annotated[str, "附带提问的图片 media_id（聊天图片占位符 [图片(media_id)] 中的哈希），可空"] = "",
         file_name: Annotated[str, "附带提问的已下载文件名（media_retriever 已下载文件），可空"] = "",
         return_scope: Annotated[str, "信息返回范围：'last'（最新一条 AI 回复，默认）/ 'full'（整段对话）"] = "last",
@@ -124,17 +124,15 @@ class AskAiAndSnapshotTool(_ToolBase):
 
 
 class DeepseekSnapshotTool(_ToolBase):
-    """直接截取 DeepSeek 对话界面为长截图并发送，不提问。"""
+    """直接截取 DeepSeek 对话界面并发送，不提问。"""
 
     name: str = "deepseek_snapshot"
     description: str = (
-        "直接截取 DeepSeek 对话界面为官方长截图并发送到当前聊天，不提问。"
-        "适用于：对方想直接看 DeepSeek 原始界面、或 DeepSeek 回复很长（人懒得总结）时，"
-        "把界面截图甩给对方看，直观又省事。conversation 参数控制截哪个会话："
-        "空（默认）截当前对话；传历史会话精确标题则进入该会话再截"
-        "（标题用 deepseek_history list 获取，未命中报错）；传 __new__ 开新对话（空会话，一般不用）。"
-        "think 控制思考过程块展开方式（collapse 默认折叠 / auto / expand / reveal），"
-        "sidebar 控制左侧边栏显示（auto 默认 / show / hide）。"
+        "截取 DeepSeek 对话界面并发送到当前聊天，不提问。"
+        "默认截取正常视窗（人类可读的标准桌面窗口比例，带浏览器顶栏，聚焦最新回复）；"
+        "若需要截取完整长回复或多轮历史问答，可传 scope='rounds' 并指定 rounds 参数"
+        "（从后往前倒序完整截取最近 rounds 个回复及提问，例如 rounds=2 截取最后两轮）；"
+        "scope='full' 为撑开整页长截图。调用后返回截断感知元数据，供你获知画面呈现内容。"
     )
 
     async def execute(
@@ -142,6 +140,8 @@ class DeepseekSnapshotTool(_ToolBase):
         conversation: Annotated[str, "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截（用 deepseek_history list 获取标题，未命中报错）；'__new__' 开新对话（空会话）"] = "",
         think: Annotated[str, "截图时思考过程块展开方式：'collapse'（折叠隐藏，默认）/ 'auto'（保持现状）/ 'expand'（强制展开）/ 'reveal'（仅被折叠时展开）"] = "collapse",
         sidebar: Annotated[str, "截图时左侧边栏显示方式：'auto'（保持现状，默认）/ 'show'（展开）/ 'hide'（收起隐藏）"] = "auto",
+        scope: Annotated[Literal["viewport", "rounds", "full"], "截图范围：'viewport' 默认正常视窗比例（推荐）/ 'rounds' 按轮次完整截取 / 'full' 撑开整页长截图"] = "viewport",
+        rounds: Annotated[int, "截取回复轮数（从后往前倒序，例如 2 表示截取最后 2 个完整回复及对应提问；默认 1，scope='rounds' 时生效）"] = 1,
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：定位会话并直接截图发送。
 
@@ -149,6 +149,8 @@ class DeepseekSnapshotTool(_ToolBase):
             conversation: 对话定位（空当前 / 精确标题进入 / __new__ 新建）。
             think: 思考块展开方式。
             sidebar: 侧边栏显示方式。
+            scope: 截图范围模式（viewport/rounds/full）。
+            rounds: 截取的轮数。
 
         Returns:
             tuple[bool, str | dict]: (是否成功, 结果或错误)。
@@ -163,6 +165,8 @@ class DeepseekSnapshotTool(_ToolBase):
             conversation=conversation,
             think=think,
             sidebar=sidebar,
+            scope=scope,
+            rounds=rounds,
         )
         if not result.ok:
             return False, result.error or "截图失败"
@@ -178,11 +182,16 @@ class DeepseekSnapshotTool(_ToolBase):
             )
             if not sent:
                 return False, "截图已生成但发送失败"
-        return True, {
+        res: dict[str, Any] = {
             "sent": True,
             "conversation": result.conversation,
-            "summary": "已截取 DeepSeek 对话界面并发出，请用拟人口吻简单引述即可。conversation 为当前对话标题。",
+            "scope": scope,
+            "rounds": rounds,
+            "summary": "已截取 DeepSeek 对话界面并发出。请结合 snapshot_meta 了解画面展示内容并拟人化引述。",
         }
+        if result.snapshot_meta:
+            res["snapshot_meta"] = result.snapshot_meta
+        return True, res
 
 
 class DeepseekShareTool(_ToolBase):

@@ -360,34 +360,26 @@ class BrowserActions(PageActions):
         region: str = "conversation",
         think: str = "collapse",
         sidebar: str = "auto",
+        scope: str = "viewport",
+        rounds: int = 1,
     ) -> list[str]:
         """截取页面区域为 data URI 列表（超长时分片）。
 
-        支持长截图：先撑开消息容器到完整内容高度，再整页截图，截完恢复。
-        若撑开后的整页高度超过 ``max_screenshot_height``，按上限高度分片
-        逐段截取（每片为独立 PNG data URI），保证完整对话不被截断；
-        单张不超限时返回仅含一张的列表。
+        - scope="viewport"（默认）：截取当前人类可读的正常桌面视窗（16:9/16:10，聚焦最新回复）；
+        - scope="rounds"：从后往前倒序完整截取最近 rounds 个回复及对应提问；
+        - scope="full"：撑开整页长截图。
 
         Args:
-            region: conversation（完整对话长图，默认）/ full（整页）。
-                当页面为 DeepSeek 时二者等价（都走撑开长截图）。
-            think: 深度思考"思考过程"块展开方式：collapse（折叠隐藏，默认）/
-                auto（保持现状）/ expand（强制展开）/ reveal（仅当被
-                折叠时展开，用于保证截图能包含思考内容）。
-            sidebar: 左侧边栏显示方式：auto（保持现状，默认）/ show（展开）/
-                hide（收起隐藏）。
+            region: conversation / full。
+            think: 深度思考展开方式（collapse/auto/expand/reveal）。
+            sidebar: 左侧边栏显示方式（auto/show/hide）。
+            scope: 截图范围（viewport / rounds / full）。
+            rounds: 当 scope="rounds" 时截取的回复轮数。
 
         Returns:
-            list[str]: PNG data URI 列表（按文档自上而下顺序）；失败返回空列表。
+            list[str]: PNG data URI 列表。
         """
         page = self._page
-        # 非 DeepSeek 页面或无消息容器时，直接整页长截图
-        if not await self._conversation_visible():
-            return await self._fullpage_shots()
-
-        # 顺序关键：先折叠/展开思考块与侧边栏（影响 DOM 内容高度），
-        # 再撑开消息容器——height:auto 会按折叠后的实际内容重算高度，
-        # 避免截图长度停留在思考块展开时的完整高度（底部留白）。
         think_mode = normalize_think(think)
         think_saved: list[Any] = []
         if think_mode:
@@ -396,12 +388,29 @@ class BrowserActions(PageActions):
         sidebar_saved: list[Any] = []
         if sidebar_mode:
             sidebar_saved = list(await page.evaluate(SIDEBAR_SCRIPT, sidebar_mode) or [])
-        saved = await page.evaluate(EXPAND_SCRIPT, CONVERSATION_SELECTOR)
+
         try:
-            await page.wait_for_timeout(150)
-            return await self._fullpage_shots()
+            if scope == "rounds" or rounds > 1:
+                return await self._rounds_shot(rounds=rounds)
+            if scope == "full":
+                if not await self._conversation_visible():
+                    return await self._fullpage_shots()
+                return await self._expanded_fullpage_shots(
+                    EXPAND_SCRIPT,
+                    RESTORE_SCRIPT,
+                    expand_arg=CONVERSATION_SELECTOR,
+                    wait_ms=150,
+                )
+
+            # 默认正常视窗截图（滚动到最新消息位置）
+            try:
+                await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001
+                pass
+            return await self._viewport_shot()
         finally:
             try:
-                await page.evaluate(RESTORE_SCRIPT, {"saved": saved + think_saved + sidebar_saved})
-            except Exception:  # noqa: BLE001 - 恢复失败不阻塞
+                await page.evaluate(RESTORE_SCRIPT, {"saved": think_saved + sidebar_saved})
+            except Exception:  # noqa: BLE001
                 pass

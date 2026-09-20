@@ -40,6 +40,7 @@ from ..services.service import (
     AskResult,
     ask_doubao,
     capture_doubao_snapshot,
+    download_doubao_chat_images,
     generate_doubao_image,
     strip_data_uri_prefix,
     submit_doubao_video,
@@ -101,10 +102,14 @@ class AskDoubaoTool(_DoubaoToolBase):
         "（豆包仅接受图片/文档，单文件≤20MB，不支持音频/视频），"
         "信息返回范围（last 最新回复 / full 整段对话）。"
         "豆包无独立联网搜索开关（由模型自动决策是否联网）。"
-        "conversation 参数控制对话定位：空（默认）沿用当前对话；传历史会话精确标题则"
-        "进入该会话继续（标题用 doubao_history list 获取；未命中则新建）；"
-        "传 __new__ 强制开新对话。每次调用都会返回当前对话标题（conversation 字段），"
-        "记住它可回到同一对话。需要展示豆包原始界面时，另用 doubao_snapshot 截图。"
+        "conversation 参数控制对话定位：【持续对话规则】：若要在同一对话中持续交谈，"
+        "必须显式传入该对话的精确标题（取自上次调用返回的 conversation 字段）；"
+        "若不传该参数（留空），系统会自动开启一个全新对话，避免不同话题串台！"
+        "若用户要求结合当前对话生图、继续修改上一张图或让豆包按上下文出图，"
+        "应显式传入 conversation 并在 question 中自然要求生图；生成图片会自动下载落盘。"
+        "只有完全独立、无需对话上下文的生图任务才用 doubao_generate_image。"
+        "已有生成图需要补下载时用 doubao_download_images。"
+        "需要展示豆包原始界面时，另用 doubao_snapshot 截图。"
     )
 
     async def execute(
@@ -118,7 +123,7 @@ class AskDoubaoTool(_DoubaoToolBase):
         ] = False,
         conversation: Annotated[
             str,
-            "对话定位：空（默认）沿用当前对话；历史会话精确标题则进入继续（用 doubao_history list 获取标题，未命中则新建）；'__new__' 强制开新对话",
+            "对话定位：留空（默认）自动创建全新对话！若要在同一对话中持续聊，必须显式传入上次返回的 conversation 标题",
         ] = "",
         image_id: Annotated[
             str,
@@ -183,6 +188,7 @@ class AskDoubaoTool(_DoubaoToolBase):
                 return False, f"未找到已下载文件: {file_name}"
             local_paths.append(file_path)
 
+        multimodal = config.vision.multimodal
         result: AskResult = await ask_doubao(
             question.strip(),
             stream_id=stream_id,
@@ -192,31 +198,50 @@ class AskDoubaoTool(_DoubaoToolBase):
             conversation=conversation,
             local_paths=local_paths or None,
             return_scope=return_scope,
+            multimodal=multimodal,
             upload_max_size_mb=config.upload.max_size_mb,
         )
 
         if not result.ok:
             return False, result.error or "向豆包提问失败"
 
-        return True, {
+        res_data: dict[str, Any] = {
             "model": result.model_name,
             "reply": result.reply,
             "conversation": result.conversation,
             "summary": "这是豆包的回复内容，请自然地向用户转述/消化，无需发送截图。conversation 为当前对话标题，后续追问可传同一标题回到此对话。",
             "upload": result.upload,
         }
+        if result.images:
+            res_data["images"] = result.images
+            res_data["image_count"] = len(result.images)
+            if result.images_base64:
+                res_data["images_base64"] = result.images_base64
+                res_data["summary"] += (
+                    f" 豆包在回复中生成了 {len(result.images)} 张图片且已自动下载落盘；"
+                    "已开启多模态模式，images_base64 中携带了图片 Base64 供多模态模型直接看图。"
+                )
+            elif result.image_descriptions:
+                res_data["image_descriptions"] = result.image_descriptions
+                res_data["summary"] += (
+                    f" 豆包在回复中生成了 {len(result.images)} 张图片且已自动下载落盘；"
+                    "image_descriptions 为 VLM 提炼的画面文字描述，供你获知生成内容。"
+                )
+
+        return True, res_data
 
 
 class DoubaoSnapshotTool(_DoubaoToolBase):
-    """直接截取豆包对话界面为长截图并发送，不提问、不改设置。"""
+    """直接截取豆包对话界面并发送，不提问、不改设置。"""
 
     name: str = "doubao_snapshot"
 
     description: str = (
-        "直接截取豆包对话界面为长截图并发送到当前聊天，不提问、不换档位。"
-        "适用于：对方想直接看豆包原始界面、或回复很长时，把界面截图甩给对方。"
-        "conversation 参数控制截哪个会话：空（默认）截当前对话；传历史会话精确标题"
-        "则进入该会话再截（标题用 doubao_history list 获取，未命中报错）。"
+        "截取豆包对话界面并直接发送到当前聊天，不提问、不换档位。"
+        "默认截取正常视窗（人类可读的标准桌面窗口比例，带浏览器顶栏，聚焦最新回复）；"
+        "若需要截取完整长内容或多轮历史问答，可传 scope='rounds' 并指定 rounds 参数"
+        "（从后往前倒序完整截取最近 rounds 个回复及提问，例如 rounds=2 截取最后两轮）；"
+        "scope='full' 为整页长截图。调用后返回截断感知元数据，供你清晰获知截图中展现了什么。"
     )
 
     async def execute(
@@ -225,17 +250,24 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
             str,
             "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截（用 doubao_history list 获取标题，未命中报错）",
         ] = "",
+        scope: Annotated[
+            Literal["viewport", "rounds", "full"],
+            "截图范围：'viewport' 默认正常视窗比例（人类可读窗口，最推荐）/ 'rounds' 按轮次完整截取 / 'full' 整页长图",
+        ] = "viewport",
+        rounds: Annotated[
+            int,
+            "截取回复轮数（从后往前倒序，例如 2 表示截取最后 2 个完整回复及对应提问；默认 1，当 scope='rounds' 时生效）",
+        ] = 1,
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：定位会话并直接截图发送。
 
         Args:
-
             conversation: 对话定位（空当前 / 精确标题进入）。
+            scope: 截图范围模式（viewport/rounds/full）。
+            rounds: 截取的轮数。
 
         Returns:
-
             tuple[bool, str | dict]: (是否成功, 结果或错误)。
-
         """
 
         config = (
@@ -252,6 +284,8 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
         result: AskResult = await capture_doubao_snapshot(
             stream_id=stream_id,
             conversation=conversation,
+            scope=scope,
+            rounds=rounds,
         )
 
         if not result.ok:
@@ -273,11 +307,17 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
             if not sent:
                 return False, "截图已生成但发送失败"
 
-        return True, {
+        res: dict[str, Any] = {
             "sent": True,
             "conversation": result.conversation,
-            "summary": "已截取豆包对话界面并发出，请用拟人口吻简单引述即可。conversation 为当前对话标题。",
+            "scope": scope,
+            "rounds": rounds,
+            "summary": "已截取豆包界面并发出。请结合 snapshot_meta 了解画面展示内容并拟人化引述。",
         }
+        if result.snapshot_meta:
+            res["snapshot_meta"] = result.snapshot_meta
+
+        return True, res
 
 
 class DoubaoHistoryTool(_DoubaoToolBase):
@@ -399,7 +439,9 @@ class DoubaoGenerateImageTool(_DoubaoToolBase):
     name: str = "doubao_generate_image"
 
     description: str = (
-        "用豆包的「图像生成」能力生成图片并直接发送到当前聊天。"
+        "在全新独立对话中用豆包的「图像生成」能力生成图片并直接发送到当前聊天。"
+        "仅适合无需延续既有豆包对话语境的独立创作；若用户是在追问、修改上一张图，"
+        "或要求结合当前对话内容生图，应改用 ask_doubao 并显式传入 conversation。"
         "适合中文语境、生活化、创意插画类需求（豆包对中文提示词语义理解好）。"
         "豆包一次生成多张候选（通常 4 张），全部下载并依次发出。"
         "同步等待生成（通常 1 分钟内），完成后图片自动发出。\n"
@@ -587,6 +629,59 @@ class DoubaoGenerateImageTool(_DoubaoToolBase):
         return True, res_data
 
 
+class DoubaoDownloadImagesTool(_DoubaoToolBase):
+    """下载并发送豆包对话中已有的生成图片。"""
+
+    name: str = "doubao_download_images"
+    description: str = (
+        "下载并发送当前或指定历史豆包对话末尾回复中已经生成完成的全部候选图片，"
+        "不创建新对话、不发起新的生图任务。适用于图片已由 ask_doubao 在对话内生成，"
+        "但需要补下载、重新发送或从指定历史对话取回的场景。"
+    )
+
+    async def execute(
+        self,
+        conversation: Annotated[
+            str,
+            "对话定位：空表示当前页面；传精确标题则进入该历史对话后下载末尾生成图",
+        ] = "",
+    ) -> tuple[bool, str | dict[str, Any]]:
+        """下载并发送当前或指定对话末尾的生成图片。"""
+        stream_id = self.get_current_stream_id()
+        result = await download_doubao_chat_images(
+            stream_id=stream_id,
+            conversation=conversation,
+        )
+        if not result.ok or not result.images:
+            return False, result.error or "豆包对话图片下载失败"
+
+        import base64
+
+        sent_count = 0
+        for path in result.images:
+            try:
+                with open(path, "rb") as image_file:  # noqa: PTH123
+                    image_b64 = base64.b64encode(image_file.read()).decode("ascii")
+                if await send_api.send_image(
+                    image_b64,
+                    stream_id,
+                    processed_plain_text="[豆包对话生成图片]",
+                ):
+                    sent_count += 1
+            except OSError as exc:
+                logger.warning(f"读取豆包对话生成图片失败 {path}: {exc}")
+        if sent_count == 0:
+            return False, "图片已下载，但发送到当前聊天失败"
+        return True, {
+            "sent": True,
+            "count": sent_count,
+            "total": len(result.images),
+            "paths": result.images,
+            "conversation": result.conversation,
+            "summary": f"已从豆包对话下载并发送 {sent_count}/{len(result.images)} 张生成图片。",
+        }
+
+
 class DoubaoGenerateVideoTool(_DoubaoToolBase):
     """提交豆包视频生成任务（后台等待，完成后系统唤醒）。"""
 
@@ -758,6 +853,7 @@ DOUBAO_TOOLS: list[type[BaseTool]] = [
     DoubaoHistoryTool,
     DoubaoStateTool,
     DoubaoGenerateImageTool,
+    DoubaoDownloadImagesTool,
     DoubaoGenerateVideoTool,
     DoubaoSendVideoTool,
 ]

@@ -23,7 +23,6 @@ from src.app.plugin_system.api.media_api import get_media_info
 from src.app.plugin_system.api import prompt_api
 
 from .base.browser_session import get_manager
-from .base.page_actions import PageActions
 from .deepseek.actions import BrowserActions
 from .deepseek.constants import SEARCH_TOGGLE_NAME, THINK_TOGGLE_NAME
 from .doubao.actions import DoubaoActions
@@ -77,6 +76,10 @@ class AskResult:
     model_name: str = "deepseek.com"
     upload: str = ""
     image_path: str = ""
+    images: list[str] = field(default_factory=list)
+    image_descriptions: list[str] = field(default_factory=list)
+    images_base64: list[str] = field(default_factory=list)
+    snapshot_meta: dict[str, Any] = field(default_factory=dict)
 
 
 async def resolve_media_path(media_id: str) -> str | None:
@@ -99,56 +102,66 @@ async def resolve_media_path(media_id: str) -> str | None:
 
 
 async def _locate_conversation(
-    actions: PageActions,
+    actions: BrowserActions | GeminiActions | DoubaoActions,
     conversation: str,
     *,
     new_chat: bool = False,
     new_chat_on_miss: bool = False,
+    default_new: bool = False,
+    new_page_cb: Any | None = None,
 ) -> str | None:
-    """定位目标对话：空=沿用当前 / 精确标题=进入 / __new__=新建。
+    """定位目标对话：显式标题=进入继续；未显式指定时根据 default_new 决定。
 
-    三个站点共用此路由，语义统一：
-    - 空：沿用当前对话
-    - ``__new__``（或 new_chat=True）：新建对话
-    - 精确标题：在历史会话中查找，命中则进入；未命中时按场景决定：
+    提问场景默认开启 default_new=True：
+    - 未显式传入 conversation 标题时，一律自动新建对话（避免不同话题相互污染）；
+    - 若要在同一对话中持续交谈，调用方必须显式传入目标对话标题（来自上次返回的 conversation）。
 
-    提问场景（new_chat_on_miss=True）：标题未命中时新建对话继续提问；
-    截图/分享场景（new_chat_on_miss=False）：标题未命中时返回错误
-    （无可截取/分享的内容，不截空会话）。
+    只读场景（截图/分享）default_new=False：
+    - 未传入标题时沿用当前界面不动作；
+    - 传入标题则进入指定会话。
 
     Args:
-        actions: 站点页面动作封装（三站点接口一致）。
-        conversation: 对话定位方式。
-        new_chat: 等价 conversation="__new__"，两者取其一。
-        new_chat_on_miss: 标题未命中历史会话时是否新建对话。
+        actions: 站点页面动作封装。
+        conversation: 对话定位标题。
+        new_chat: 是否强制开新对话。
+        new_chat_on_miss: 显式传入的标题未命中历史会话时是否新建。
+        default_new: 未显式传入标题时是否默认创建新对话。
+        new_page_cb: 已有对话时用于创建新页面的异步回调。
 
     Returns:
-        str | None: 成功返回 None（已位于目标对话）；失败返回错误信息。
+        str | None: 成功返回 None；失败返回错误信息。
     """
     want_conversation = (conversation or "").strip()
     if new_chat:
         want_conversation = "__new__"
 
-    if want_conversation == "__new__":
-        # 强制新建：等待新对话稳定
+    if want_conversation == "__new__" or (not want_conversation and default_new):
+        if new_page_cb is not None:
+            page_or_session = await new_page_cb()
+            actions.use_page(getattr(page_or_session, "page", page_or_session))
         await actions.new_chat()
         await actions.page.wait_for_timeout(2500)
         return None
+
     if not want_conversation:
+        # 只读场景未指定标题：沿用当前
         return None
+
     listed = await actions.list_conversations()
     if want_conversation not in listed:
-        # 提问场景未命中则新建（DeepSeek 自动命名，不绑定名称）；
-        # 截图/分享场景未命中无可截取内容，直接报错
         if new_chat_on_miss:
+            if new_page_cb is not None:
+                page_or_session = await new_page_cb()
+                actions.use_page(getattr(page_or_session, "page", page_or_session))
             await actions.new_chat()
             await actions.page.wait_for_timeout(2500)
             return None
         return f"未找到历史会话: {want_conversation}"
+
     if not await actions.open_conversation(want_conversation):
         return f"进入历史会话失败: {want_conversation}"
-    # 侧边栏点击后 URL/标题会立即更新，但会话内容仍需加载；稍等一拍
-    # 再截图/提问，避免拍到尚未渲染完的对话。
+
+    # 稍等一拍确保会话内容渲染完成
     await actions.page.wait_for_timeout(1000)
     return None
 
@@ -305,6 +318,8 @@ async def ask_deepseek(
     think: str = "collapse",
     sidebar: str = "auto",
     return_scope: str = "last",
+    scope: str = "viewport",
+    rounds: int = 1,
     upload_max_size_mb: float = 10.0,
     upload_allowed_extensions: str | None = None,
 ) -> AskResult:
@@ -389,10 +404,19 @@ async def ask_deepseek(
             except Exception:  # noqa: BLE001 - 主题应用失败不阻塞提问
                 logger.warning("应用 DeepSeek 页面主题失败，使用默认主题")
 
-        # 2. conversation 路由：空=沿用当前 / 精确标题=进入（未命中新建）/
-        #    "__new__"=强制新建。new_chat 兼容映射为 "__new__"。
+        # 2. conversation 路由：未显式指定对话标题时默认创建新对话；
+        #    显式传精确标题则进入继续（未命中新建）。
         err = await _locate_conversation(
-            actions, conversation, new_chat=new_chat, new_chat_on_miss=True
+            actions,
+            conversation,
+            new_chat=new_chat,
+            new_chat_on_miss=True,
+            default_new=True,
+            new_page_cb=(
+                (lambda: manager.new_session_page(stream_key))
+                if session.active_conversation
+                else None
+            ),
         )
         if err:
             return AskResult(ok=False, error=err)
@@ -419,11 +443,15 @@ async def ask_deepseek(
 
         # 5. 提问并等待回复（返回干净的最新一条 AI 回复）
         try:
+            previous_reply = await actions.get_conversation_text(scope="last")
             if not await actions.type_text(question.strip()):
                 return AskResult(ok=False, error="向网页输入框输入问题失败")
             if not await actions.press("Enter"):
                 return AskResult(ok=False, error="发送问题失败")
-            done, last_reply = await actions.wait_reply_done(timeout_s=timeout_s)
+            done, last_reply = await actions.wait_reply_done(
+                timeout_s=timeout_s,
+                previous_reply=previous_reply,
+            )
         except Exception as exc:  # noqa: BLE001 - 网页提问失败
             logger.error(f"网页提问失败: {exc}", exc_info=True)
             return AskResult(ok=False, error=f"网页提问失败: {exc}")
@@ -445,7 +473,9 @@ async def ask_deepseek(
         # 8. 仅 snapshot 输出形式截图（auto 只返回文本，截图由解耦后的
         #    capture_snapshot / deepseek_snapshot 入口负责）
         if output_format == "snapshot":
-            data_uris = await actions.screenshot("conversation", think=think, sidebar=sidebar)
+            data_uris = await actions.screenshot(
+                "conversation", think=think, sidebar=sidebar, scope=scope, rounds=rounds
+            )
             if not data_uris:
                 return AskResult(
                     ok=False,
@@ -453,12 +483,14 @@ async def ask_deepseek(
                     reply=content,
                     conversation=current_title,
                 )
+            meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
             return AskResult(
                 ok=True,
                 reply=content,
                 data_uri=data_uris,
                 conversation=current_title,
                 upload=_upload_notice(local_path),
+                snapshot_meta=meta,
             )
         return AskResult(
             ok=True,
@@ -481,6 +513,9 @@ async def ask_gemini(
     local_path: str | None = None,
     output_format: str = "auto",
     return_scope: str = "last",
+    scope: str = "viewport",
+    rounds: int = 1,
+    multimodal: bool = False,
     upload_max_size_mb: float = 10.0,
     upload_allowed_extensions: str = GEMINI_ALLOWED_EXTENSIONS,
 ) -> AskResult:
@@ -541,9 +576,18 @@ async def ask_gemini(
             except Exception:  # noqa: BLE001 - 主题应用失败不阻塞提问
                 logger.warning("应用 Gemini 页面主题失败，使用默认主题")
 
-        # 1. conversation 路由：空=沿用当前 / 精确标题=进入（未命中新建）/
-        #    "__new__"=强制新建
-        err = await _locate_conversation(actions, conversation, new_chat_on_miss=True)
+        # 1. conversation 路由：未显式指定对话标题时默认新建；显式传精确标题进入继续
+        err = await _locate_conversation(
+            actions,
+            conversation,
+            new_chat_on_miss=True,
+            default_new=True,
+            new_page_cb=(
+                (lambda: manager.new_session_page(stream_key, theme="gemini"))
+                if session.active_conversation
+                else None
+            ),
+        )
         if err:
             return AskResult(ok=False, error=err)
 
@@ -571,11 +615,16 @@ async def ask_gemini(
                 return AskResult(ok=False, error=msg)
 
         # 3. 提问并等待回复
+        image_count_before = await actions.generated_image_count()
         try:
+            previous_reply = await actions.get_conversation_text(scope="last")
             ok, msg = await actions.ask(question.strip())
             if not ok:
                 return AskResult(ok=False, error=msg)
-            done, last_reply = await actions.wait_reply_done(timeout_s=timeout_s)
+            done, last_reply = await actions.wait_reply_done(
+                timeout_s=timeout_s,
+                previous_reply=previous_reply,
+            )
         except Exception as exc:  # noqa: BLE001 - 网页提问失败
             logger.error(f"Gemini 网页提问失败: {exc}", exc_info=True)
             return AskResult(ok=False, error=f"Gemini 网页提问失败: {exc}")
@@ -584,11 +633,30 @@ async def ask_gemini(
 
         # 3b. 检测对话中是否生成了图片（AI 直接出图时自动下载；纯文本回复跳过）
         image_path = ""
+        gemini_images: list[str] = []
+        gemini_descs: list[str] = []
+        gemini_b64: list[str] = []
         try:
             image_path = await actions.try_download_generated_image(
                 save_dir="data/ai_ui_snapshot_profile/gemini/images",
                 wait_s=30,
+                previous_count=image_count_before,
             ) or ""
+            if image_path:
+                gemini_images.append(image_path)
+                import base64
+                from src.app.plugin_system.api import media_api
+                try:
+                    with open(image_path, "rb") as f:  # noqa: PTH123
+                        raw_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    if multimodal:
+                        gemini_b64.append(raw_b64)
+                    else:
+                        desc = await media_api.recognize_media(raw_b64, "image")
+                        if desc:
+                            gemini_descs.append(desc.strip())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"处理 Gemini 生成图片感知失败: {exc}")
         except Exception as exc:  # noqa: BLE001 - 检测/下载失败不阻塞提问
             logger.warning(f"检测 Gemini 生成图片失败: {exc}")
 
@@ -606,10 +674,11 @@ async def ask_gemini(
 
         # 6. 仅 snapshot 输出形式截图
         if output_format == "snapshot":
-            data_uris = await actions.screenshot("conversation")
+            data_uris = await actions.screenshot("conversation", scope=scope, rounds=rounds)
             if not data_uris:
                 return AskResult(ok=False, error="对话区截图失败", reply=content,
                                  conversation=current_title)
+            meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
             return AskResult(
                 ok=True,
                 reply=content,
@@ -618,6 +687,10 @@ async def ask_gemini(
                 model_name="gemini.google.com",
                 upload=_upload_notice(local_path),
                 image_path=image_path,
+                images=gemini_images,
+                image_descriptions=gemini_descs,
+                images_base64=gemini_b64,
+                snapshot_meta=meta,
             )
         return AskResult(
             ok=True,
@@ -626,6 +699,57 @@ async def ask_gemini(
             model_name="gemini.google.com",
             upload=_upload_notice(local_path),
             image_path=image_path,
+            images=gemini_images,
+            image_descriptions=gemini_descs,
+            images_base64=gemini_b64,
+        )
+    finally:
+        session.release()
+
+
+async def download_gemini_chat_image(
+    *,
+    stream_id: str = "",
+    conversation: str = "",
+    save_dir: str = "data/ai_ui_snapshot_profile/gemini/images",
+) -> AskResult:
+    """下载当前或指定 Gemini 对话中的最近一张生成图片。
+
+    Args:
+        stream_id: 聊天流 ID。
+        conversation: 对话标题；为空使用当前页面。
+        save_dir: 图片保存目录。
+
+    Returns:
+        AskResult: 成功时 images 与 image_path 包含本地文件路径。
+    """
+    try:
+        manager = get_manager()
+        stream_key = stream_id or "default"
+        session = await manager.get(stream_key, theme="gemini")
+        session.hold()
+        manager.touch(stream_key, theme="gemini")
+    except Exception as exc:  # noqa: BLE001 - 会话创建失败
+        return AskResult(ok=False, error=f"获取浏览器会话失败: {exc}")
+
+    try:
+        actions = GeminiActions(
+            session.page,
+            touch_cb=lambda: manager.touch(stream_key, theme="gemini"),
+        )
+        err = await _locate_conversation(actions, conversation)
+        if err:
+            return AskResult(ok=False, error=err)
+        path = await actions.download_generated_image(save_dir)
+        if not path:
+            return AskResult(ok=False, error="当前对话中未找到可下载的 Gemini 生成图片")
+        current_title = await actions.get_active_conversation_title()
+        return AskResult(
+            ok=True,
+            conversation=current_title,
+            image_path=path,
+            images=[path],
+            model_name="gemini.google.com",
         )
     finally:
         session.release()
@@ -637,6 +761,8 @@ async def capture_snapshot(
     conversation: str = "",
     think: str = "collapse",
     sidebar: str = "auto",
+    scope: str = "viewport",
+    rounds: int = 1,
 ) -> AskResult:
     """直接截取当前/指定 DeepSeek 对话界面，不提问。
 
@@ -648,6 +774,8 @@ async def capture_snapshot(
         conversation: 对话定位方式。
         think: 思考过程块展开方式（collapse 默认 / auto / expand / reveal）。
         sidebar: 侧边栏显示方式（auto 默认 / show / hide）。
+        scope: 截图范围模式（viewport 正常视窗 / rounds 倒序轮次 / full 整页长图）。
+        rounds: 截取回复轮数（scope=rounds 时生效）。
 
     Returns:
         AskResult: 成功时 ok=True 且 data_uri 含截图；失败时 ok=False。
@@ -677,10 +805,15 @@ async def capture_snapshot(
         current_id = await actions.get_active_conversation_id()
         current_title = await actions.get_active_conversation_title()
         session.set_active_conversation(current_id, current_title)
-        data_uris = await actions.screenshot("conversation", think=think, sidebar=sidebar)
+        data_uris = await actions.screenshot(
+            "conversation", think=think, sidebar=sidebar, scope=scope, rounds=rounds
+        )
         if not data_uris:
             return AskResult(ok=False, error="对话区截图失败", conversation=current_title)
-        return AskResult(ok=True, data_uri=data_uris, conversation=current_title)
+        meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
+        return AskResult(
+            ok=True, data_uri=data_uris, conversation=current_title, snapshot_meta=meta
+        )
     finally:
         session.release()
 
@@ -791,17 +924,22 @@ async def capture_gemini_snapshot(
     stream_id: str = "",
     conversation: str = "",
     think: str = "auto",
+    scope: str = "viewport",
+    rounds: int = 1,
 ) -> AskResult:
     """直接截取当前/指定 Gemini 对话界面，不提问、不改设置。
 
     定位会话（空=沿用当前 / 精确标题=进入该历史会话 / __new__=新建）后
-    直接长截图；与 DeepSeek 的 :func:`capture_snapshot` 对应，供 Gemini
+    直接截图；与 DeepSeek 的 :func:`capture_snapshot` 对应，供 Gemini
     侧 ``gemini_snapshot`` 工具调用。
 
     Args:
         stream_id: 聊天流 ID（用于隔离浏览器会话）。
         conversation: 对话定位：空（默认）沿用当前对话；精确标题进入
             该历史会话（未命中报错）；"__new__" 强制新建。
+        think: 思考参数。
+        scope: 截图范围模式（viewport 正常视窗 / rounds 倒序轮次 / full 整页长图）。
+        rounds: 截取回复轮数（scope=rounds 时生效）。
 
     Returns:
         AskResult: 成功时 ok=True 且 data_uri 含截图；失败时 ok=False。
@@ -834,14 +972,18 @@ async def capture_gemini_snapshot(
         current_id = await actions.get_active_conversation_id()
         current_title = await actions.get_active_conversation_title()
         session.set_active_conversation(current_id, current_title)
-        data_uris = await actions.screenshot("conversation", think=think)
+        data_uris = await actions.screenshot(
+            "conversation", think=think, scope=scope, rounds=rounds
+        )
         if not data_uris:
             return AskResult(ok=False, error="对话区截图失败", conversation=current_title)
+        meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
         return AskResult(
             ok=True,
             data_uri=data_uris,
             conversation=current_title,
             model_name="gemini.google.com",
+            snapshot_meta=meta,
         )
     finally:
         session.release()
@@ -869,26 +1011,23 @@ async def generate_gemini_image(
     Returns:
         str | None: 保存的本地文件路径；失败返回 None。
     """
+    manager = get_manager()
+    page = None
     try:
-        manager = get_manager()
-        stream_key = stream_id or "default"
-        session = await manager.get(stream_key, theme="gemini")
-        session.hold()
-        manager.touch(stream_key, theme="gemini")
-    except Exception as exc:  # noqa: BLE001 - 会话创建失败
-        logger.error(f"获取浏览器会话失败: {exc}", exc_info=True)
-        return None
-
-    try:
+        page = await manager.open_page("gemini", "https://gemini.google.com/app")
+        await page.wait_for_timeout(3000)
         actions = GeminiActions(
-            session.page,
+            page,
             max_screenshot_height=manager.max_screenshot_height,
-            touch_cb=lambda: manager.touch(stream_key, theme="gemini"),
             theme=manager.page_theme,
             decoration_enabled=manager.decoration_enabled,
             decoration_theme=manager.decoration_theme,
             decoration_avatar_url=manager.decoration_avatar_url,
         )
+        if not await actions.new_chat():
+            logger.error("Gemini 独立生图新建对话失败")
+            return None
+        await page.wait_for_timeout(1500)
         ok, path = await actions.generate_image(
             prompt,
             save_dir,
@@ -901,7 +1040,7 @@ async def generate_gemini_image(
         logger.error(f"Gemini 图片生成失败: {exc}", exc_info=True)
         return None
     finally:
-        session.release()
+        await manager.close_page(page)
 
 
 async def create_gemini_share(
@@ -967,8 +1106,8 @@ DOUBAO_UPLOAD_MAX_MB = 20.0
 DOUBAO_IMAGE_SAVE_DIR = "data/ai_ui_snapshot_profile/doubao/images"
 DOUBAO_VIDEO_SAVE_DIR = "data/ai_ui_snapshot_profile/doubao/videos"
 
-# 豆包媒体生成互斥锁：媒体专用浏览器与共享会话共用同一 doubao profile，
-# 同 profile 双开 Chrome 会崩溃（exitCode=21），媒体任务期间须独占
+# 豆包媒体生成互斥锁：限制同一账号同时只运行一个生图或生视频任务，
+# 普通对话使用独立页面，不参与此锁。
 _doubao_media_lock = asyncio.Lock()
 
 
@@ -985,71 +1124,15 @@ def _release_media_lock() -> None:
     _doubao_media_lock.release()
 
 
-async def _open_doubao_media_context(headless: bool | None = None):
-    """打开豆包媒体生成专用的独立浏览器上下文（需持有 _doubao_media_lock）。
-
-    媒体生成（生图/生视频/附件提问）用独立 persistent context（复用同一
-    登录 profile），任务结束即关。headless 默认跟随共享管理器配置
-    （服务器无显示器环境为无头）；同一 profile 可能被共享会话占用：
-    本函数会先关闭 doubao 主题的共享会话再启动；调用方必须全程持有
-    ``_doubao_media_lock`` 直至上下文关闭。
-
-    Args:
-        headless: 是否无头；None（默认）跟随共享管理器 headless 配置。
+async def _open_doubao_media_page():
+    """在豆包共享浏览器中打开媒体生成专用页面。
 
     Returns:
-        tuple: (playwright, context, page)；启动失败抛异常。
+        tuple: (浏览器会话管理器, page)；启动失败抛异常。
     """
-    if headless is None:
-        headless = get_manager().headless
     manager = get_manager()
-    # 关闭 doubao 共享会话，避免两个 Chrome 实例争用同一 profile 崩溃
-    await manager.close_all_theme("doubao")
-    from playwright.async_api import async_playwright
-
-    from .base.browser_session import (
-        STEALTH_INIT_SCRIPT,
-        _default_browser_path,
-        _resolve_real_user_agent,
-    )
-
-    p = await async_playwright().start()
-    chrome_path = manager.browser_path_attr or _default_browser_path()
-    profile_dir = manager.profile_root_attr / "doubao"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    launch_kwargs: dict = {
-        "user_data_dir": str(profile_dir),
-        "headless": headless,
-        "viewport": manager.viewport,
-        "device_scale_factor": manager.device_scale_factor,
-        "permissions": ["clipboard-read", "clipboard-write"],
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-        ],
-        "ignore_default_args": ["--enable-automation"],
-    }
-    if chrome_path:
-        launch_kwargs["executable_path"] = chrome_path
-        if headless:
-            # 无头启动需替换掉 UA 中的无头标识，避免站点风控吊销登录态
-            real_ua = await _resolve_real_user_agent(chrome_path)
-            if real_ua:
-                launch_kwargs["user_agent"] = real_ua
-    try:
-        context = await p.chromium.launch_persistent_context(**launch_kwargs)
-    except Exception:
-        try:
-            await p.stop()
-        except Exception:  # noqa: BLE001
-            pass
-        raise
-    page = context.pages[0] if context.pages else await context.new_page()
-    if chrome_path:
-        # 与共享会话一致：真实 Chrome 时注入反指纹脚本（有头同样需要）
-        await page.add_init_script(STEALTH_INIT_SCRIPT)
-    return p, context, page
+    page = await manager.open_page("doubao")
+    return manager, page
 
 
 async def ask_doubao(
@@ -1063,6 +1146,9 @@ async def ask_doubao(
     local_paths: list[str] | None = None,
     output_format: str = "auto",
     return_scope: str = "last",
+    scope: str = "viewport",
+    rounds: int = 1,
+    multimodal: bool = False,
     upload_max_size_mb: float = DOUBAO_UPLOAD_MAX_MB,
     upload_allowed_extensions: str = DOUBAO_ALLOWED_EXTENSIONS,
 ) -> AskResult:
@@ -1100,27 +1186,22 @@ async def ask_doubao(
         return AskResult(ok=False, error="问题不能为空")
 
     attachments = [str(p) for p in (local_paths or []) if str(p).strip()]
-    # 带附件时整体持媒体锁：共享会话与媒体生成上下文共用同一 profile，
-    # 同 profile 双开 Chrome 会崩溃，锁同时保证媒体任务期间不抢 profile
-    if attachments:
-        await _doubao_media_lock.acquire()
-    try:
-        return await _ask_doubao_in_shared_session(
-            question.strip(),
-            stream_id=stream_id,
-            timeout_s=timeout_s,
-            model=model,
-            new_chat=new_chat,
-            conversation=conversation,
-            local_paths=attachments,
-            output_format=output_format,
-            return_scope=return_scope,
-            upload_max_size_mb=upload_max_size_mb,
-            upload_allowed_extensions=upload_allowed_extensions,
-        )
-    finally:
-        if attachments:
-            _release_media_lock()
+    return await _ask_doubao_in_shared_session(
+        question.strip(),
+        stream_id=stream_id,
+        timeout_s=timeout_s,
+        model=model,
+        new_chat=new_chat,
+        conversation=conversation,
+        local_paths=attachments,
+        output_format=output_format,
+        return_scope=return_scope,
+        scope=scope,
+        rounds=rounds,
+        multimodal=multimodal,
+        upload_max_size_mb=upload_max_size_mb,
+        upload_allowed_extensions=upload_allowed_extensions,
+    )
 
 
 async def _ask_doubao_in_shared_session(
@@ -1134,6 +1215,9 @@ async def _ask_doubao_in_shared_session(
     local_paths: list[str] | None = None,
     output_format: str = "auto",
     return_scope: str = "last",
+    scope: str = "viewport",
+    rounds: int = 1,
+    multimodal: bool = False,
     upload_max_size_mb: float = DOUBAO_UPLOAD_MAX_MB,
     upload_allowed_extensions: str = DOUBAO_ALLOWED_EXTENSIONS,
 ) -> AskResult:
@@ -1190,9 +1274,18 @@ async def _ask_doubao_in_shared_session(
             if not ok:
                 return AskResult(ok=False, error=f"设置豆包档位失败: {msg}")
 
-        # 2. conversation 路由（与 Gemini 同款：未命中历史则新建）
+        # 2. conversation 路由：未显式指定对话标题时默认新建；显式传精确标题进入继续
         err = await _locate_conversation(
-            actions, conversation, new_chat=new_chat, new_chat_on_miss=True
+            actions,
+            conversation,
+            new_chat=new_chat,
+            new_chat_on_miss=True,
+            default_new=True,
+            new_page_cb=(
+                (lambda: manager.new_session_page(stream_key, theme="doubao"))
+                if session.active_conversation
+                else None
+            ),
         )
         if err:
             return AskResult(ok=False, error=err)
@@ -1218,10 +1311,14 @@ async def _ask_doubao_in_shared_session(
 
         # 4. 提问并等待回复
         try:
+            previous_reply = await actions.get_conversation_text(scope="last")
             ok, msg = await actions.ask(question)
             if not ok:
                 return AskResult(ok=False, error=msg)
-            done, last_reply = await actions.wait_reply_done(timeout_s=timeout_s)
+            done, last_reply = await actions.wait_reply_done(
+                timeout_s=timeout_s,
+                previous_reply=previous_reply,
+            )
         except Exception as exc:  # noqa: BLE001 - 网页提问失败
             logger.error(f"豆包网页提问失败: {exc}", exc_info=True)
             return AskResult(ok=False, error=f"豆包网页提问失败: {exc}")
@@ -1242,6 +1339,39 @@ async def _ask_doubao_in_shared_session(
         else:
             content = last_reply
 
+        # 5.5 探测聊天中是否生成了图片（如插画、生图等），有则自动下载落盘并按配置处理视觉感知
+        saved_images: list[str] = []
+        image_descs: list[str] = []
+        images_b64: list[str] = []
+        try:
+            chat_img_urls = await actions.extract_chat_images()
+            if chat_img_urls:
+                saved_images = await actions.download_generated_images(
+                    chat_img_urls, DOUBAO_IMAGE_SAVE_DIR
+                )
+                if saved_images:
+                    logger.info(f"在豆包对话中检测并自动下载了 {len(saved_images)} 张生成图片")
+                    import base64
+                    from src.app.plugin_system.api import media_api
+                    total_imgs = len(saved_images)
+                    for idx, img_p in enumerate(saved_images, 1):
+                        try:
+                            with open(img_p, "rb") as f:  # noqa: PTH123
+                                raw_b64 = base64.b64encode(f.read()).decode("utf-8")
+                            if multimodal:
+                                # 开关开启：多模态直传模式，直接返回 Base64 供多模态模型看图
+                                images_b64.append(raw_b64)
+                            else:
+                                # 开关默认关闭：走框架内置 VLM 提炼简短画面文字描述，对纯文本模型安全且省 Token
+                                desc = await media_api.recognize_media(raw_b64, "image")
+                                if desc:
+                                    prefix = f"【图{idx}】" if total_imgs > 1 else ""
+                                    image_descs.append(f"{prefix}{desc.strip()}")
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(f"处理图片感知失败 {img_p}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - 提取生图失败不阻断对话
+            logger.warning(f"检测或下载对话生图失败: {exc}")
+
         # 6. 读取当前活跃会话 ID 与标题并同步到会话
         current_id = await actions.get_active_conversation_id()
         current_title = await actions.wait_conversation_title()
@@ -1249,10 +1379,11 @@ async def _ask_doubao_in_shared_session(
 
         # 7. 仅 snapshot 输出形式截图
         if output_format == "snapshot":
-            data_uris = await actions.screenshot("conversation")
+            data_uris = await actions.screenshot("conversation", scope=scope, rounds=rounds)
             if not data_uris:
                 return AskResult(ok=False, error="对话区截图失败", reply=content,
                                  conversation=current_title)
+            meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
             return AskResult(
                 ok=True,
                 reply=content,
@@ -1260,6 +1391,10 @@ async def _ask_doubao_in_shared_session(
                 conversation=current_title,
                 model_name="doubao.com",
                 upload=upload_notice,
+                images=saved_images,
+                image_descriptions=image_descs,
+                images_base64=images_b64,
+                snapshot_meta=meta,
             )
         return AskResult(
             ok=True,
@@ -1267,6 +1402,9 @@ async def _ask_doubao_in_shared_session(
             conversation=current_title,
             model_name="doubao.com",
             upload=upload_notice,
+            images=saved_images,
+            image_descriptions=image_descs,
+            images_base64=images_b64,
         )
     finally:
         session.release()
@@ -1276,6 +1414,8 @@ async def capture_doubao_snapshot(
     *,
     stream_id: str = "",
     conversation: str = "",
+    scope: str = "viewport",
+    rounds: int = 1,
 ) -> AskResult:
     """直接截取当前/指定豆包对话界面，不提问、不改设置。
 
@@ -1287,6 +1427,8 @@ async def capture_doubao_snapshot(
         stream_id: 聊天流 ID（用于隔离浏览器会话）。
         conversation: 对话定位：空（默认）沿用当前对话；精确标题进入
             该历史会话（未命中报错）。
+        scope: 截图范围模式（viewport 正常视窗 / rounds 倒序轮次 / full 整页长图）。
+        rounds: 截取回复轮数（scope=rounds 时生效）。
 
     Returns:
         AskResult: 成功时 ok=True 且 data_uri 含截图；失败时 ok=False。
@@ -1318,13 +1460,68 @@ async def capture_doubao_snapshot(
         current_id = await actions.get_active_conversation_id()
         current_title = await actions.get_active_conversation_title()
         session.set_active_conversation(current_id, current_title)
-        data_uris = await actions.screenshot("conversation")
+        data_uris = await actions.screenshot(
+            "conversation", scope=scope, rounds=rounds
+        )
         if not data_uris:
             return AskResult(ok=False, error="对话区截图失败", conversation=current_title)
+        meta = await actions.get_snapshot_meta(scope=scope, rounds=rounds)
         return AskResult(
             ok=True,
             data_uri=data_uris,
             conversation=current_title,
+            model_name="doubao.com",
+            snapshot_meta=meta,
+        )
+    finally:
+        session.release()
+
+
+async def download_doubao_chat_images(
+    *,
+    stream_id: str = "",
+    conversation: str = "",
+    save_dir: str = DOUBAO_IMAGE_SAVE_DIR,
+) -> AskResult:
+    """下载当前或指定豆包对话末尾回复中的生成图片。
+
+    Args:
+        stream_id: 聊天流 ID。
+        conversation: 对话标题；为空使用当前页面。
+        save_dir: 图片保存目录。
+
+    Returns:
+        AskResult: 成功时 images 包含全部本地文件路径。
+    """
+    try:
+        manager = get_manager()
+        stream_key = stream_id or "default"
+        session = await manager.get(stream_key, theme="doubao")
+        session.hold()
+        manager.touch(stream_key, theme="doubao")
+    except Exception as exc:  # noqa: BLE001 - 会话创建失败
+        return AskResult(ok=False, error=f"获取浏览器会话失败: {exc}")
+
+    try:
+        actions = DoubaoActions(
+            session.page,
+            touch_cb=lambda: manager.touch(stream_key, theme="doubao"),
+        )
+        err = await _locate_conversation(actions, conversation)
+        if err:
+            return AskResult(ok=False, error=err)
+        image_urls = await actions.extract_chat_images()
+        if not image_urls:
+            return AskResult(ok=False, error="当前对话末尾未找到豆包生成图片")
+        paths = await actions.download_generated_images(image_urls, save_dir)
+        if not paths:
+            return AskResult(ok=False, error="找到豆包生成图片，但下载失败")
+        current_title = await actions.get_active_conversation_title()
+        return AskResult(
+            ok=True,
+            conversation=current_title,
+            image_path=paths[0],
+            images=paths,
             model_name="doubao.com",
         )
     finally:
@@ -1346,8 +1543,8 @@ async def generate_doubao_image(
 ) -> tuple[bool, list[str], str, str]:
     """用豆包"图像生成"技能生成图片并保存到本地（同步等待完成）。
 
-    豆包一次生成多张候选（通常 4 张），全部下载返回。流程：独立浏览器
-    （媒体生成需独占 media profile）→ 新对话 → 激活技能 → （可选）上传
+    豆包一次生成多张候选（通常 4 张），全部下载返回。流程：共享浏览器的
+    独立页面 → 新对话 → 激活技能 → （可选）上传
     参考图（图生图/改图，可多张）→ 设置原生 UI 参数（模型/比例/风格）→
     提交描述 → 处理参数确认/建议 → 等 CDN 大图（全量候选）→ 批量 fetch 落盘 → 关闭。
 
@@ -1382,10 +1579,10 @@ async def generate_doubao_image(
 
     async with _doubao_media_lock:
         try:
-            p, context, page = await _open_doubao_media_context()
+            manager, page = await _open_doubao_media_page()
         except Exception as exc:  # noqa: BLE001 - 启动失败
-            logger.error(f"打开豆包媒体浏览器失败: {exc}", exc_info=True)
-            return False, [], f"打开豆包媒体浏览器失败: {exc}", ""
+            logger.error(f"打开豆包媒体页面失败: {exc}", exc_info=True)
+            return False, [], f"打开豆包媒体页面失败: {exc}", ""
         try:
             await page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
@@ -1457,7 +1654,7 @@ async def generate_doubao_image(
                 return False, [], "图片已生成但下载失败", ""
             return True, paths, "", proposal
         finally:
-            await _close_media_context(p, context)
+            await manager.close_page(page)
 
 
 async def submit_doubao_video(
@@ -1507,19 +1704,18 @@ async def submit_doubao_video(
     want_ratio = (aspect_ratio or "").strip() or DEFAULT_VIDEO_RATIO
     want_duration = (duration or "").strip() or DEFAULT_VIDEO_DURATION
 
-    # 手动持有媒体锁（不用 async with）：提交成功后锁与浏览器一并移交后台
-    # 任务（其在视频任务结束时关闭浏览器并释放锁）；其余路径统一在本函数
-    # finally 关闭浏览器并释放锁
+    # 手动持有媒体锁（不用 async with）：提交成功后锁与媒体页面一并移交
+    # 后台任务；其余路径统一在 finally 关闭页面并释放锁。
     await _doubao_media_lock.acquire()
     lock_transferred = False
-    browser: tuple[Any, Any] | None = None
+    media_page: tuple[Any, Any] | None = None
     try:
         try:
-            p, context, page = await _open_doubao_media_context()
-            browser = (p, context)
+            manager, page = await _open_doubao_media_page()
+            media_page = (manager, page)
         except Exception as exc:  # noqa: BLE001 - 启动失败
-            logger.error(f"打开豆包媒体浏览器失败: {exc}", exc_info=True)
-            return False, f"打开豆包媒体浏览器失败: {exc}", ""
+            logger.error(f"打开豆包媒体页面失败: {exc}", exc_info=True)
+            return False, f"打开豆包媒体页面失败: {exc}", ""
         try:
             await page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
@@ -1579,13 +1775,13 @@ async def submit_doubao_video(
                 stream_id,
                 actions,
                 prompt.strip()[:60],
-                closer=lambda: _close_media_context_sync(p, context),
+                closer=lambda: manager.close_page(page),
                 lock=_doubao_media_lock,
             )
             if started:
                 lock_transferred = True
-                # 浏览器与锁一并移交后台任务，由其在任务结束时关闭/释放
-                browser = None
+                # 页面与锁一并移交后台任务，由其在任务结束时关闭/释放
+                media_page = None
                 return True, (
                     "视频生成任务已提交并转入后台等待（豆包生成约需 2-5 分钟）。"
                     "完成后会收到系统通知，届时再决定是否把视频发给用户。"
@@ -1595,35 +1791,7 @@ async def submit_doubao_video(
             logger.error(f"提交豆包视频任务异常: {exc}", exc_info=True)
             return False, f"提交视频任务异常: {exc}", ""
     finally:
-        if browser is not None:
-            await _close_media_context(*browser)
+        if media_page is not None:
+            await media_page[0].close_page(media_page[1])
         if not lock_transferred:
             _release_media_lock()
-
-
-async def _close_media_context(p, context) -> None:  # noqa: ANN001 - playwright 对象
-    """关闭媒体生成专用浏览器上下文（异常静默）。"""
-    try:
-        await context.close()
-        await p.stop()
-    except Exception:  # noqa: BLE001 - 关闭异常忽略
-        pass
-
-
-def _close_media_context_sync(p, context) -> None:  # noqa: ANN001 - playwright 对象
-    """同步包装：为后台任务关闭回调创建异步关闭任务。
-
-    由后台协程（视频生成守护任务）的 finally 调用，故取运行中的事件循环；
-    用 ``get_event_loop`` 在无运行循环时会创建/意外复用循环，已弃用。
-
-    Args:
-        p: Playwright 实例。
-        context: 浏览器上下文。
-    """
-    import asyncio
-
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_close_media_context(p, context))
-    except Exception:  # noqa: BLE001 - 关闭异常忽略
-        pass

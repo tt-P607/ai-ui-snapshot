@@ -188,12 +188,13 @@ GET_MODEL_SCRIPT = """() => {
     const btns = Array.from(document.querySelectorAll('button'));
     const b = btns.find(el => {
         const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-        return t === '豆包 快速' || t === '豆包 2.1 Turbo 专家'
+        return t === '豆包 快速' || t === '豆包 2.1 Turbo'
+            || t === '豆包 2.1 Turbo 专家'
             || /^豆包.+快速$/.test(t) || /^豆包.+专家$/.test(t);
     });
     if (!b) return '';
     const t = (b.innerText || '').replace(/\\s+/g, ' ').trim();
-    if (t.includes('专家')) return '专家';
+    if (t.includes('专家') || t.includes('Turbo')) return '专家';
     if (t.includes('快速')) return '快速';
     return t;
 }"""

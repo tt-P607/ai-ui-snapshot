@@ -34,7 +34,7 @@ logger = get_logger("ai_ui_snapshot.command")
 def _parse_ask_flags(text: str) -> tuple[str, str, str, bool | None, bool | None, str, str, str, bool, str]:
     """解析 /ask 命令的可选开关前缀。
 
-    支持 ``-g``（站点：gemini）、``-db``（站点：doubao；默认 deepseek）、
+    支持 ``-g``（站点：gemini）、``-db`` / ``-doubao``（站点：豆包；默认 deepseek）、
     ``-m <模式/模型>``（Gemini 模型名 / 豆包模型档位）、``-d``（深度思考开）、
     ``-d-``（深度思考关）、``-s``（联网开）、``-s-``（联网关）、
     ``-t <思考方式>``（思考过程块展开方式：展开/折叠/收起/reveal/

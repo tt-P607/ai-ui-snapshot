@@ -231,6 +231,19 @@ class AiUiSnapshotConfig(BaseConfig):
             tag="ai",
             order=3,
         )
+
+    @config_section("vision", title="视觉与多模态感知", tag="ai")
+    class VisionSection(SectionBase):
+        """网页对话中生成/返回图片给 Bot 时的视觉感知配置。"""
+
+        multimodal: bool = Field(
+            default=False,
+            description="是否开启多模态直接看图开关：默认关闭（走框架内置 VLM 提炼画面文字描述，对纯文本及所有大模型友好且省 Token）；开启后直接返回图片 Base64，需确保 Bot 主模型原生支持多模态输入",
+            label="多模态看图",
+            tag="ai",
+            order=0,
+        )
+
     plugin: PluginSection = Field(default_factory=PluginSection)
     sites: SitesSection = Field(default_factory=SitesSection)
     web: WebSection = Field(default_factory=WebSection)
@@ -238,3 +251,4 @@ class AiUiSnapshotConfig(BaseConfig):
     decoration: DecorationSection = Field(default_factory=DecorationSection)
     upload: UploadSection = Field(default_factory=UploadSection)
     recognize: RecognizeSection = Field(default_factory=RecognizeSection)
+    vision: VisionSection = Field(default_factory=VisionSection)

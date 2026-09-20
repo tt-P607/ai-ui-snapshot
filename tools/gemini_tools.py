@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
@@ -24,6 +24,7 @@ from ..services.service import (
     ask_gemini,
     capture_gemini_snapshot,
     create_gemini_share,
+    download_gemini_chat_image,
     generate_gemini_image,
     resolve_media_path,
     strip_data_uri_prefix,
@@ -53,9 +54,13 @@ class AskGeminiAiTool(_ToolBase):
         "Gemini 不锁定模型，每次调用可按需切换，"
         "无需开新对话。think 控制是否开启扩展思考（深度思考）：true 开 / false 关 / "
         "空由你按问题复杂度自主决定——复杂推理/数学/代码题可开，简单问答不必开。"
-        "conversation 控制对话定位：空沿用当前、精确标题进入历史会话（未命中新建）、"
-        "__new__ 开新对话。每次返回 conversation 对话标题，记住它可回到同一对话。"
-        "生成图片请用 gemini_generate_image，分享链接用 gemini_share。"
+        "conversation 控制对话定位：【持续对话规则】：若要在同一对话中持续交谈，"
+        "必须显式传入该对话的精确标题（取自上次调用返回的 conversation 字段）；"
+        "若不传该参数（留空），系统会自动开启一个全新对话，避免不同话题串台！"
+        "若用户要求结合当前对话内容生图或修改刚才生成的图，应显式传入 conversation，"
+        "直接在问题中自然要求 Gemini 生成/修改图片；生成结果会自动下载并发送。"
+        "只有完全独立、无需对话上下文的生图任务才用 gemini_generate_image。"
+        "已有生成图需要补下载时用 gemini_download_image，分享链接用 gemini_share。"
     )
 
     async def execute(
@@ -63,7 +68,7 @@ class AskGeminiAiTool(_ToolBase):
         question: Annotated[str, "要提问的问题原文（完整、自然语言）"] = "",
         model: Annotated[str, "Gemini 模型关键词：'Flash-Lite'（极速）/'Flash'（全方位，默认）/'Pro'（高阶），自动匹配网页当前版本"] = "",
         think: Annotated[bool | None, "是否开启扩展思考（深度思考）：true 开 / false 关 / 空由你按问题复杂度自主决定"] = None,
-        conversation: Annotated[str, "对话定位：空（默认）沿用当前对话；历史会话精确标题则进入继续；'__new__' 强制开新对话"] = "",
+        conversation: Annotated[str, "对话定位：留空（默认）自动创建全新对话！若要在同一对话中持续聊，必须显式传入上次返回的 conversation 标题"] = "",
         image_id: Annotated[str, "附带提问的媒体 media_id（聊天里图片/语音/视频占位符 [media(media_id)] 中的哈希），可空；语音即转述说了什么、视频即看画面内容"] = "",
         file_name: Annotated[str, "附带提问的已下载文件名（media_retriever 已下载文件），可空"] = "",
         return_scope: Annotated[str, "信息返回范围：'last'（最新一条 AI 回复，默认）/ 'full'（整段对话）"] = "last",
@@ -103,6 +108,7 @@ class AskGeminiAiTool(_ToolBase):
                 if not local_path:
                     return False, f"未找到已下载文件: {file_name}"
 
+        multimodal = config.vision.multimodal
         result: AskResult = await ask_gemini(
             question.strip(),
             stream_id=stream_id,
@@ -113,6 +119,7 @@ class AskGeminiAiTool(_ToolBase):
             local_path=local_path,
             output_format="auto",
             return_scope=return_scope,
+            multimodal=multimodal,
             upload_max_size_mb=config.upload.max_size_mb,
         )
         if not result.ok:
@@ -131,13 +138,21 @@ class AskGeminiAiTool(_ToolBase):
                 "回复正文见 reply 字段，请一并自然转述。"
             )
 
-        return True, {
+        res_data: dict[str, Any] = {
             "model": result.model_name,
             "reply": result.reply,
             "conversation": result.conversation,
             "summary": summary,
             "upload": result.upload,
         }
+        if result.images:
+            res_data["images"] = result.images
+            if result.images_base64:
+                res_data["images_base64"] = result.images_base64
+            elif result.image_descriptions:
+                res_data["image_descriptions"] = result.image_descriptions
+
+        return True, res_data
 
     @staticmethod
     async def _send_generated_image(result: AskResult, stream_id: str) -> bool:
@@ -173,7 +188,9 @@ class GeminiGenerateImageTool(_ToolBase):
 
     name: str = "gemini_generate_image"
     description: str = (
-        "用 Gemini 原生图片生成能力生成一张图片并发送到当前聊天。"
+        "在全新独立对话中用 Gemini 原生图片生成能力生成一张图片并发送到当前聊天。"
+        "仅适合无需延续既有 Gemini 对话语境的独立创作；若用户是在追问、修改上一张图，"
+        "或要求结合当前对话内容生图，应改用 ask_gemini_ai 并显式传入 conversation。"
         "prompt 描述想要的画面（画幅/风格/内容写清楚，如'一张横版的赛博朋克城市夜景水彩画'）。"
         "reference_image_ids 可传参考图 media_id 列表（聊天图片占位符中的哈希，可传 1 张或"
         "多张）：提供后 Gemini 会基于这些参考图改图/参考生成（prompt 里描述修改意图，"
@@ -249,31 +266,69 @@ class GeminiGenerateImageTool(_ToolBase):
         }
 
 
+class GeminiDownloadImageTool(_ToolBase):
+    """下载并发送 Gemini 对话中已有的生成图片。"""
+
+    name: str = "gemini_download_image"
+    description: str = (
+        "点击 Gemini 网页中的图片下载按钮，下载并发送当前或指定历史对话里最近一张"
+        "已经生成完成的图片，不发起新的生图任务。适用于图片已在 ask_gemini_ai 的对话"
+        "中生成，但需要补下载、重新发送或从指定历史对话取回的场景。"
+    )
+
+    async def execute(
+        self,
+        conversation: Annotated[
+            str,
+            "对话定位：空表示当前页面；传精确标题则进入该历史对话后下载最近生成图",
+        ] = "",
+    ) -> tuple[bool, str | dict[str, Any]]:
+        """下载并发送当前或指定对话中的最近生成图。"""
+        stream_id = self.get_current_stream_id()
+        result = await download_gemini_chat_image(
+            stream_id=stream_id,
+            conversation=conversation,
+            save_dir=_DEFAULT_IMAGE_DIR,
+        )
+        if not result.ok or not result.image_path:
+            return False, result.error or "Gemini 对话图片下载失败"
+        sent = await AskGeminiAiTool._send_generated_image(result, stream_id)
+        if not sent:
+            return False, "图片已下载，但发送到当前聊天失败"
+        return True, {
+            "sent": True,
+            "path": result.image_path,
+            "conversation": result.conversation,
+            "summary": "已从 Gemini 对话下载最近一张生成图片并发送。",
+        }
+
+
 class GeminiSnapshotTool(_ToolBase):
-    """直接截取 Gemini 对话界面为长截图并发送，不提问、不改设置。"""
+    """直接截取 Gemini 对话界面并发送，不提问、不改设置。"""
 
     name: str = "gemini_snapshot"
     description: str = (
-        "直接截取 Gemini 对话界面为官方长截图并发送到当前聊天，不提问、不改模型/扩展思考开关。"
-        "适用于：对方想直接看 Gemini 原始界面、或 Gemini 回复很长（人懒得总结）时，"
-        "把界面截图甩给对方看。conversation 参数控制截哪个会话："
-        "空（默认）截当前对话；传历史会话精确标题则进入该会话再截（标题用 gemini 提问工具"
-        "返回的 conversation 字段或历史列表获取，未命中报错）；"
-        "传 __new__ 开新对话（空会话，一般不用）。"
-        "说明：Gemini 的扩展思考（深度思考）开关只决定 AI 是否思考，思考内容会内联显示在"
-        "回复里，无独立折叠 UI；需要让 AI 思考后回复，请在 ask_gemini_ai 的 think 参数控制。"
+        "截取 Gemini 对话界面并发送到当前聊天，不提问、不改模型/扩展思考开关。"
+        "默认截取正常视窗（人类可读的标准桌面窗口比例，带浏览器顶栏，聚焦最新回复）；"
+        "若需要截取完整长回复或多轮历史问答，可传 scope='rounds' 并指定 rounds 参数"
+        "（从后往前倒序完整截取最近 rounds 个回复及提问，例如 rounds=2 截取最后两轮）；"
+        "scope='full' 为撑开整页长截图。调用后返回截断感知元数据，供你获知画面呈现内容。"
     )
 
     async def execute(
         self,
         conversation: Annotated[str, "对话定位：空（默认）截当前对话；历史会话精确标题则进入该会话再截（未命中报错）；'__new__' 开新对话"] = "",
         think: Annotated[str, "'auto'（默认）。Gemini 思考内容无独立折叠 UI，截图不展开/折叠思考"] = "auto",
+        scope: Annotated[Literal["viewport", "rounds", "full"], "截图范围：'viewport' 默认正常视窗比例（推荐）/ 'rounds' 按轮次完整截取 / 'full' 撑开整页长截图"] = "viewport",
+        rounds: Annotated[int, "截取回复轮数（从后往前倒序，例如 2 表示截取最后 2 个完整回复及对应提问；默认 1，scope='rounds' 时生效）"] = 1,
     ) -> tuple[bool, str | dict[str, Any]]:
         """执行：定位会话并直接截图发送。
 
         Args:
             conversation: 对话定位（空当前 / 精确标题进入 / __new__ 新建）。
             think: 思考过程块展开方式（auto/expand/collapse）。
+            scope: 截图范围模式（viewport/rounds/full）。
+            rounds: 截取的轮数。
 
         Returns:
             tuple[bool, str | dict]: (是否成功, 结果或错误)。
@@ -287,6 +342,8 @@ class GeminiSnapshotTool(_ToolBase):
             stream_id=stream_id,
             conversation=conversation,
             think=think,
+            scope=scope,
+            rounds=rounds,
         )
         if not result.ok:
             return False, result.error or "截图失败"
@@ -302,11 +359,16 @@ class GeminiSnapshotTool(_ToolBase):
             )
             if not sent:
                 return False, "截图已生成但发送失败"
-        return True, {
+        res: dict[str, Any] = {
             "sent": True,
             "conversation": result.conversation,
-            "summary": "已截取 Gemini 对话界面并发出，请用拟人口吻简单引述即可。conversation 为当前对话标题。",
+            "scope": scope,
+            "rounds": rounds,
+            "summary": "已截取 Gemini 对话界面并发出。请结合 snapshot_meta 了解画面展示内容并拟人化引述。",
         }
+        if result.snapshot_meta:
+            res["snapshot_meta"] = result.snapshot_meta
+        return True, res
 
 
 class GeminiShareTool(_ToolBase):
@@ -356,6 +418,7 @@ class GeminiShareTool(_ToolBase):
 GEMINI_TOOLS: list[type[BaseTool]] = [
     AskGeminiAiTool,
     GeminiGenerateImageTool,
+    GeminiDownloadImageTool,
     GeminiSnapshotTool,
     GeminiShareTool,
 ]

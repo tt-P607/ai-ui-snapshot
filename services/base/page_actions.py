@@ -82,6 +82,14 @@ class PageActions:
         """当前页面对象。"""
         return self._page
 
+    def use_page(self, page: Any) -> None:
+        """切换后续动作使用的页面。
+
+        Args:
+            page: 新的 Playwright 页面对象。
+        """
+        self._page = page
+
     async def check_blocker(self) -> str:
         """检测站点风控拦截（人机验证等），命中时记录供上层给出明确提示。
 
@@ -375,21 +383,27 @@ class PageActions:
         except Exception:  # noqa: BLE001 - 页面未就绪
             return False
 
-    async def wait_reply_done(self, timeout_s: int = 240) -> tuple[bool, str]:
+    async def wait_reply_done(
+        self,
+        timeout_s: int = 240,
+        *,
+        previous_reply: str | None = None,
+    ) -> tuple[bool, str]:
         """轮询等待 AI 回复完成，并返回干净的最新一条 AI 回复。
 
         以生成中指示器（站点自定：停止按钮/停止文案）作强信号：只要仍在生成绝不
-        判完成；指示器消失后叠加"最新回复长度连续稳定"兜底判定。轮询期间调用
+        判完成；指示器消失后叠加"最新回复内容连续稳定"兜底判定。轮询期间调用
         保活回调刷新会话活动时间，避免长等待被空闲清理。返回正文不含思考块。
 
         Args:
             timeout_s: 超时秒数。
+            previous_reply: 发送前的上一条 AI 回复；提供时必须等到正文发生变化。
 
         Returns:
             tuple[bool, str]: (是否完成, 最新一条 AI 回复正文)。
         """
         deadline = asyncio.get_running_loop().time() + timeout_s
-        last_len = 0
+        last_text = ""
         stable = 0
         text = ""
         while asyncio.get_running_loop().time() < deadline:
@@ -410,17 +424,23 @@ class PageActions:
             if generating:
                 # 仍在生成：重置稳定计数，绝不提前判完成
                 stable = 0
-                last_len = len(text)
+                last_text = text
                 await asyncio.sleep(self.poll_interval_s)
                 continue
-            if len(text) > last_len:
-                last_len = len(text)
+            if previous_reply is not None and text == previous_reply:
+                # 思考结束到正文开始之间，页面仍保留上一轮回复；不能将其当作本轮结果。
+                stable = 0
+                last_text = text
+            elif not text:
+                stable = 0
+                last_text = text
+            elif text != last_text:
+                last_text = text
                 stable = 0
             else:
                 stable += 1
-            # last_len > 0 保证正文已开始输出（未开始时取不到正文）；
-            # 不用更大阈值，否则一句话级别的短回复会被误判为超时。
-            if stable >= 4 and last_len > 0:
+            # 正文已开始且内容连续稳定；不用更大阈值，否则短回复会被误判为超时。
+            if stable >= 4 and text:
                 return True, text
             await asyncio.sleep(self.poll_interval_s)
         return False, text
@@ -466,6 +486,18 @@ class PageActions:
                 return title
             await asyncio.sleep(1)
         return ""
+
+    async def new_chat(self) -> bool:
+        """新建对话（站点子类覆盖）。"""
+        return False
+
+    async def list_conversations(self) -> list[str]:
+        """列出历史会话标题（站点子类覆盖）。"""
+        return []
+
+    async def open_conversation(self, title: str) -> bool:
+        """打开指定标题的历史会话（站点子类覆盖）。"""
+        return False
 
     async def get_active_conversation_id(self) -> str:
         """读取当前活跃对话的稳定 ID（URL 中的会话 UUID）。
@@ -630,6 +662,29 @@ class PageActions:
             logger.warning("合并浏览器外壳图像失败，使用原始截图")
             return piece_bytes
 
+    async def _encode_png_pieces(
+        self,
+        pieces: list[bytes],
+        *,
+        width: int,
+    ) -> list[str]:
+        """统一装饰并编码截图 PNG 分片。
+
+        Args:
+            pieces: 按页面顺序排列的 PNG 字节列表。
+            width: 截图宽度，用于渲染浏览器外壳。
+
+        Returns:
+            list[str]: PNG data URI 列表；空输入返回空列表。
+        """
+        if not pieces:
+            return []
+        if self._decoration_enabled:
+            banner = await self._capture_chrome_banner(width)
+            if banner:
+                pieces[0] = self._prepend_chrome_banner(pieces[0], banner)
+        return [data_uri(piece) for piece in pieces]
+
     # ------------------------------------------------------------------
     # 整页长截图（站点无关：分片 + 外壳横幅）
     # ------------------------------------------------------------------
@@ -674,18 +729,194 @@ class PageActions:
                     raw_pieces.append(data)
                     offset += piece_h
 
-            if not raw_pieces:
-                return []
-
-            # 首张截图顶部新增拼接浏览器外壳横幅
-            if self._decoration_enabled:
-                banner_bytes = await self._capture_chrome_banner(width)
-                if banner_bytes:
-                    raw_pieces[0] = self._prepend_chrome_banner(raw_pieces[0], banner_bytes)
-
-            return [data_uri(p) for p in raw_pieces]
+            return await self._encode_png_pieces(raw_pieces, width=width)
         except Exception:  # noqa: BLE001 - 截图失败
             return []
+
+    async def _expanded_fullpage_shots(
+        self,
+        expand_script: str,
+        restore_script: str,
+        *,
+        expand_arg: Any | None = None,
+        saved_key: str | None = None,
+        require_saved: bool = False,
+        wait_ms: int = 200,
+    ) -> list[str]:
+        """在站点临时展开页面后截图，并保证恢复页面状态。
+
+        Args:
+            expand_script: 站点专属页面展开脚本。
+            restore_script: 站点专属页面恢复脚本。
+            expand_arg: 传给展开脚本的可选参数。
+            saved_key: 展开结果中保存恢复数据的键；为空时结果本身即恢复数据。
+            require_saved: 未取得恢复数据时是否放弃截图。
+            wait_ms: 展开后等待页面重排的毫秒数。
+
+        Returns:
+            list[str]: 整页截图 data URI 列表；未成功展开时返回空列表。
+        """
+        result = (
+            await self._page.evaluate(expand_script)
+            if expand_arg is None
+            else await self._page.evaluate(expand_script, expand_arg)
+        )
+        saved = result.get(saved_key) if saved_key and isinstance(result, dict) else result
+        if require_saved and not saved:
+            return []
+        try:
+            await self._page.wait_for_timeout(wait_ms)
+            return await self._fullpage_shots()
+        finally:
+            if saved is not None:
+                try:
+                    await self._page.evaluate(restore_script, {"saved": saved})
+                except Exception:  # noqa: BLE001 - 恢复失败不阻塞截图结果
+                    pass
+
+    async def _viewport_shot(self) -> list[str]:
+        """截取当前正常视口窗口（人类可读的标准桌面浏览器比例），带外壳装饰。
+
+        直接捕获当前可视区域（full_page=False），宽高比与真实桌面浏览器一致
+        （例如 1280x800 或 1440x900）。首张截图顶部拼接 Chrome 外壳横幅，
+        形成逼真、可读、未拉伸畸变的正常窗口截图。
+
+        Returns:
+            list[str]: PNG data URI 列表（通常仅含 1 张）；失败返回空列表。
+        """
+        try:
+            viewport = self._page.viewport_size or {"width": 1280, "height": 800}
+            width = int(viewport.get("width", 1280))
+            data = await self._page.screenshot(type="png", full_page=False)
+            return await self._encode_png_pieces([data], width=width)
+        except Exception:  # noqa: BLE001 - 截图失败
+            return []
+
+    async def _rounds_shot(self, rounds: int = 1) -> list[str]:
+        """从后往前倒序截取最近 N 轮完整回复及提问的对话区域。
+
+        定位末尾 N 个回复与其对应的提问行，计算该区域在文档中的真实坐标
+        进行精准裁切截图。若高度在 max_screenshot_height 范围内则完整
+        单张输出（带浏览器外壳）；超出则按高度分片。
+
+        Args:
+            rounds: 截取的回复轮数（默认 1，即截取最后一个完整问答）。
+
+        Returns:
+            list[str]: PNG data URI 列表。
+        """
+        try:
+            num = max(1, rounds)
+            clip_info = await self._page.evaluate(
+                """(r) => {
+                    const aiSelectors = '[class*="md-box-root"], .ds-markdown, [class*="model-response"], [data-role="assistant"]';
+                    let aiReplies = Array.from(document.querySelectorAll(aiSelectors));
+                    if (!aiReplies.length) {
+                        aiReplies = Array.from(document.querySelectorAll('[class*="v_list_row"], [class*="message"]'));
+                    }
+                    if (!aiReplies.length) return null;
+
+                    const targets = aiReplies.slice(-r);
+                    const firstTarget = targets[0];
+                    const lastTarget = targets[targets.length - 1];
+
+                    let startEl = firstTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || firstTarget;
+                    if (startEl && startEl.previousElementSibling) {
+                        const prev = startEl.previousElementSibling;
+                        if (prev.querySelector('[class*="send-msg-bubble"], [class*="user"], [data-role="user"]')
+                            || (prev.innerText || '').length > 0) {
+                            startEl = prev;
+                        }
+                    }
+                    let endEl = lastTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || lastTarget;
+
+                    try { startEl.scrollIntoView({ block: 'start' }); } catch(e) {}
+
+                    const startRect = startEl.getBoundingClientRect();
+                    const endRect = endEl.getBoundingClientRect();
+
+                    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+                    const top = Math.max(0, startRect.top + scrollY);
+                    const bottom = endRect.bottom + scrollY;
+                    const height = Math.max(120, bottom - top);
+                    const width = document.documentElement.scrollWidth || window.innerWidth || 1280;
+
+                    return { x: 0, y: top, width: width, height: height };
+                }""",
+                num,
+            )
+            if not clip_info:
+                # 无法按元素定位轮次时退回视口截图
+                return await self._viewport_shot()
+
+            width = int(clip_info.get("width") or 1280)
+            height = int(clip_info.get("height") or 800)
+            base_y = float(clip_info.get("y") or 0)
+
+            raw_pieces: list[bytes] = []
+            if height <= self._max_screenshot_height:
+                clip = {"x": 0, "y": base_y, "width": width, "height": height}
+                data = await self._page.screenshot(type="png", clip=clip)
+                raw_pieces.append(data)
+            else:
+                offset = 0
+                while offset < height:
+                    piece_h = min(self._max_screenshot_height, height - offset)
+                    clip = {"x": 0, "y": base_y + offset, "width": width, "height": piece_h}
+                    data = await self._page.screenshot(type="png", clip=clip)
+                    raw_pieces.append(data)
+                    offset += piece_h
+
+            if not raw_pieces:
+                return await self._viewport_shot()
+            return await self._encode_png_pieces(raw_pieces, width=width)
+        except Exception:  # noqa: BLE001 - 异常退回视口截图
+            return await self._viewport_shot()
+
+    async def get_snapshot_meta(self, scope: str = "viewport", rounds: int = 1) -> dict[str, Any]:
+        """提取当前截图画面的内容摘要与截断感知状态。
+
+        为 Bot 提供结构化反馈，使其清晰获知：
+        - 画面中展示了哪些内容、包含了几轮回复；
+        - 是否有更早的历史消息在上方被截断；
+        - 底部是否有未完全展示的内容；
+        - 截图中是否包含了模型生成的图片。
+
+        Args:
+            scope: 截图范围模式（viewport/rounds/full）。
+            rounds: 截取的轮数。
+
+        Returns:
+            dict[str, Any]: 元数据字典。
+        """
+        try:
+            meta = await self._page.evaluate(
+                """([sc, rd]) => {
+                    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+                    const maxScroll = Math.max(0, (document.documentElement.scrollHeight || 0) - (window.innerHeight || 0));
+                    const hasEarlier = scrollY > 80;
+                    const hasLater = (maxScroll - scrollY) > 80;
+
+                    const text = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+                    const snippet = text.slice(0, 150);
+
+                    const imgs = Array.from(document.querySelectorAll('img'))
+                        .filter(im => im.naturalWidth >= 200 && im.naturalHeight >= 200);
+
+                    return {
+                        scope: sc,
+                        rounds: rd,
+                        has_earlier_history: hasEarlier,
+                        has_later_content: hasLater,
+                        visible_images_count: imgs.length,
+                        visible_snippet: snippet,
+                    };
+                }""",
+                [scope, rounds],
+            )
+            return meta if isinstance(meta, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
 
     @staticmethod
     def _vstack_png(pieces: list[bytes]) -> bytes:

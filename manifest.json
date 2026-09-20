@@ -1,8 +1,8 @@
 {
   "name": "ai_ui_snapshot",
   "display_name": "AI UI 仿真截图",
-  "version": "1.12.1",
-  "description": "拟人化使用 DeepSeek、Gemini 与豆包插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini/豆包网页，通过封装好的高层工具（DeepSeek：一键提问 ask_deepseek、直接截图 deepseek_snapshot、分享链接 deepseek_share、历史会话 deepseek_history、状态查询 deepseek_state；Gemini：提问 ask_gemini_ai、生图 gemini_generate_image、截图 gemini_snapshot、分享 gemini_share；豆包：提问 ask_doubao、截图 doubao_snapshot、历史会话 doubao_history、状态查询 doubao_state、生图 doubao_generate_image、生视频 doubao_generate_video、发送视频 doubao_send_video）让 bot 像真人一样使用主流 AI 网页，支持模型/开关/全模态附件/长截图/分享链接/图片生成/视频生成，UI 完全真实；并可接管框架的图片识别（用真实网页给图片生成描述）",
+  "version": "1.13.0",
+  "description": "拟人化使用 DeepSeek、Gemini 与豆包插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini/豆包网页，通过封装好的高层工具让 bot 像真人一样使用主流 AI 网页；支持多会话并行、模型/开关/全模态附件/截图/分享链接、在当前对话内生图并下载，以及独立生图/视频生成；并可接管框架的图片识别。",
   "author": "言柒",
   "license": "AGPL-3.0",
   "homepage": "https://github.com/tt-P607/ai-ui-snapshot",
@@ -76,13 +76,19 @@
     {
       "component_type": "tool",
       "component_name": "ask_gemini_ai",
-      "description": "向 Gemini 真实提问（全模态：图片/语音/视频/文档），返回回复文本；支持模型/扩展思考/对话定位/附带媒体",
+      "description": "向 Gemini 真实提问（全模态：图片/语音/视频/文档），支持在指定对话中持续交谈或按上下文生成图片并自动下载",
       "dependencies": []
     },
     {
       "component_type": "tool",
       "component_name": "gemini_generate_image",
-      "description": "用 Gemini 原生能力生成图片（可带 1 张/多张参考图改图/参考生成），自动发送到当前聊天",
+      "description": "在独立新对话中用 Gemini 原生能力生成图片（可带参考图），自动发送到当前聊天",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "gemini_download_image",
+      "description": "下载并发送当前或指定 Gemini 对话中已经生成完成的最近一张图片，不发起新生图任务",
       "dependencies": []
     },
     {
@@ -100,7 +106,7 @@
     {
       "component_type": "tool",
       "component_name": "ask_doubao",
-      "description": "向豆包真实提问并返回回复文本（内部消化转述）；支持深度思考/联网搜索/附带图片或文件/信息返回范围",
+      "description": "向豆包真实提问并返回回复文本；支持在指定对话中持续交谈或按上下文生成图片并自动下载",
       "dependencies": []
     },
     {
@@ -124,7 +130,13 @@
     {
       "component_type": "tool",
       "component_name": "doubao_generate_image",
-      "description": "用豆包图像生成能力生图并自动发送（中文语境/创意插画优势，同步等待约 1 分钟）",
+      "description": "在独立新对话中用豆包图像生成能力生图并自动发送（同步等待约 1 分钟）",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "doubao_download_images",
+      "description": "下载并发送当前或指定豆包对话末尾已经生成完成的全部候选图片，不发起新生图任务",
       "dependencies": []
     },
     {
