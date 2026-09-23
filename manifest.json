@@ -1,7 +1,7 @@
 {
   "name": "ai_ui_snapshot",
   "display_name": "AI UI 仿真截图",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "description": "拟人化使用 DeepSeek、Gemini 与豆包插件：用 bot 专属账号登录态驱动真实 DeepSeek/Gemini/豆包网页，通过封装好的高层工具让 bot 像真人一样使用主流 AI 网页；支持多会话并行、模型/开关/全模态附件/截图/分享链接、在当前对话内生图并下载，以及独立生图/视频生成；并可接管框架的图片识别。",
   "author": "言柒",
   "license": "AGPL-3.0",

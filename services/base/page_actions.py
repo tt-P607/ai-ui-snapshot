@@ -21,6 +21,44 @@ from .utils import data_uri
 
 logger = get_logger("ai_ui_snapshot.page_actions")
 
+# 轮次裁切定位脚本：定位末尾 N 个 AI 回复及其对应提问所在区域，
+# 返回该区域在文档中的真实坐标（含视口之外的部分）。
+# 站点回复容器选择器差异较大，故按常见语义类名依次尝试，
+# 最后回退到消息行容器。
+ROUNDS_CLIP_SCRIPT = """(r) => {
+    const aiSelectors = '[class*="md-box-root"], .ds-markdown, [class*="model-response"], [data-role="assistant"]';
+    let aiReplies = Array.from(document.querySelectorAll(aiSelectors));
+    if (!aiReplies.length) {
+        aiReplies = Array.from(document.querySelectorAll('[class*="v_list_row"], [class*="message"]'));
+    }
+    if (!aiReplies.length) return null;
+
+    const targets = aiReplies.slice(-r);
+    const firstTarget = targets[0];
+    const lastTarget = targets[targets.length - 1];
+
+    let startEl = firstTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || firstTarget;
+    if (startEl && startEl.previousElementSibling) {
+        const prev = startEl.previousElementSibling;
+        if (prev.querySelector('[class*="send-msg-bubble"], [class*="user"], [data-role="user"]')
+            || (prev.innerText || '').length > 0) {
+            startEl = prev;
+        }
+    }
+    const endEl = lastTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || lastTarget;
+
+    const startRect = startEl.getBoundingClientRect();
+    const endRect = endEl.getBoundingClientRect();
+
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const top = Math.max(0, startRect.top + scrollY);
+    const bottom = endRect.bottom + scrollY;
+    const height = Math.max(120, bottom - top);
+    const width = document.documentElement.scrollWidth || window.innerWidth || 1280;
+
+    return { x: 0, y: top, width: width, height: height };
+}"""
+
 
 class PageActions:
     """封装对单个页面对象的通用细粒度操作与站点共享会话动作。
@@ -48,6 +86,13 @@ class PageActions:
     # 站点风控拦截提示检测脚本（站点差异，子类覆盖）：返回拦截提示文本，
     # 无拦截返回空字符串。站点无人机校验时留空即不检测。
     blocker_script: str = ""
+    # 整页展开/恢复脚本（站点差异，子类覆盖）：供长截图与轮次截图在撑开
+    # 页面后测量真实内容高度。留空表示站点内容已在文档流中，无需展开。
+    expand_script: str = ""
+    restore_script: str = ""
+    expand_arg: Any = None
+    expand_saved_key: str = ""
+    expand_wait_ms: int = 200
 
     def __init__(
         self,
@@ -96,6 +141,10 @@ class PageActions:
         站点触发人机校验时会弹出无法自动完成的验证层，此时继续轮询只会
         等到超时并给出模糊错误；提前识别可立即中断并告知人工介入。
 
+        每次调用都把结果写入 ``last_blocker``（包括无拦截时清空）：该字段
+        用于失败归因，若只增不减，一旦历史某轮命中过就会污染后续全部判断，
+        把普通的超时/参数确认失败误报成"人机验证"。
+
         Returns:
             str: 拦截提示文本；无拦截或站点未配置检测脚本时为空字符串。
         """
@@ -105,8 +154,7 @@ class PageActions:
             hint = str(await self._page.evaluate(self.blocker_script) or "")
         except Exception:  # noqa: BLE001 - 页面未就绪
             return ""
-        if hint:
-            self.last_blocker = hint
+        self.last_blocker = hint
         return hint
 
     # ------------------------------------------------------------------
@@ -696,6 +744,18 @@ class PageActions:
         except Exception:  # noqa: BLE001 - 页面未就绪
             return 0
 
+    def _screenshot_sections(self, height: int) -> list[tuple[int, int]]:
+        """在单张高度上限内均分截图，返回各片的起点与高度。"""
+        piece_count = (height + self._max_screenshot_height - 1) // self._max_screenshot_height
+        base_height, extra_pixels = divmod(height, piece_count)
+        offset = 0
+        sections: list[tuple[int, int]] = []
+        for index in range(piece_count):
+            piece_height = base_height + (index < extra_pixels)
+            sections.append((offset, piece_height))
+            offset += piece_height
+        return sections
+
     async def _fullpage_shots(self) -> list[str]:
         """整页长截图；超长时按 ``max_screenshot_height`` 分片截取。
 
@@ -721,13 +781,10 @@ class PageActions:
                 data = await self._page.screenshot(type="png", full_page=True)
                 raw_pieces.append(data)
             else:
-                offset = 0
-                while offset < height:
-                    piece_h = min(self._max_screenshot_height, height - offset)
+                for offset, piece_h in self._screenshot_sections(height):
                     clip = {"x": 0, "y": offset, "width": width, "height": piece_h}
                     data = await self._page.screenshot(type="png", full_page=True, clip=clip)
                     raw_pieces.append(data)
-                    offset += piece_h
 
             return await self._encode_png_pieces(raw_pieces, width=width)
         except Exception:  # noqa: BLE001 - 截图失败
@@ -792,12 +849,61 @@ class PageActions:
         except Exception:  # noqa: BLE001 - 截图失败
             return []
 
+    async def _expand_for_capture(self) -> Any:
+        """撑开页面以完整渲染全部对话内容，返回供恢复使用的数据。
+
+        会话内容位于站点内部滚动容器时，未撑开的消息不在文档流中，
+        直接按坐标裁切只能得到视口高度的画面。子类可覆盖本方法与
+        :meth:`_restore_after_capture` 以适配非 DOM 展开方式（如撑高虚拟视口）。
+
+        Returns:
+            Any: 恢复所需数据；未展开时返回 None。
+        """
+        if not self.expand_script:
+            return None
+        result = (
+            await self._page.evaluate(self.expand_script)
+            if self.expand_arg is None
+            else await self._page.evaluate(self.expand_script, self.expand_arg)
+        )
+        if self.expand_saved_key and isinstance(result, dict):
+            return result.get(self.expand_saved_key)
+        return result
+
+    async def _restore_after_capture(self, payload: Any) -> None:
+        """恢复 :meth:`_expand_for_capture` 造成的页面变化。
+
+        Args:
+            payload: :meth:`_expand_for_capture` 的返回值。
+        """
+        if payload is None or not self.restore_script:
+            return
+        try:
+            await self._page.evaluate(self.restore_script, {"saved": payload})
+        except Exception:  # noqa: BLE001 - 恢复失败不阻塞截图结果
+            pass
+
+    async def _clip_shot(self, clip: dict[str, Any]) -> bytes:
+        """按文档坐标裁切截图。
+
+        ``clip`` 使用文档坐标（含视口之外的部分），因此必须与
+        ``full_page=True`` 配合：单独传 ``clip`` 时 Playwright 只在当前
+        视口内裁切，超出视口的内容会被静默丢弃，表现为“长截图被截断”。
+
+        Args:
+            clip: 裁切区域（x/y/width/height，文档坐标）。
+
+        Returns:
+            bytes: PNG 字节。
+        """
+        return await self._page.screenshot(type="png", full_page=True, clip=clip)
+
     async def _rounds_shot(self, rounds: int = 1) -> list[str]:
         """从后往前倒序截取最近 N 轮完整回复及提问的对话区域。
 
-        定位末尾 N 个回复与其对应的提问行，计算该区域在文档中的真实坐标
-        进行精准裁切截图。若高度在 max_screenshot_height 范围内则完整
-        单张输出（带浏览器外壳）；超出则按高度分片。
+        会话内容位于站点内部滚动容器（文档本身不滚动）时，未撑开的消息
+        不在文档流中，直接按坐标裁切只会得到视口高度的画面。因此先按站点
+        脚本撑开页面、再测量目标区域、最后整页裁切，结束后恢复页面。
 
         Args:
             rounds: 截取的回复轮数（默认 1，即截取最后一个完整问答）。
@@ -805,46 +911,10 @@ class PageActions:
         Returns:
             list[str]: PNG data URI 列表。
         """
+        saved = await self._expand_for_capture()
         try:
-            num = max(1, rounds)
-            clip_info = await self._page.evaluate(
-                """(r) => {
-                    const aiSelectors = '[class*="md-box-root"], .ds-markdown, [class*="model-response"], [data-role="assistant"]';
-                    let aiReplies = Array.from(document.querySelectorAll(aiSelectors));
-                    if (!aiReplies.length) {
-                        aiReplies = Array.from(document.querySelectorAll('[class*="v_list_row"], [class*="message"]'));
-                    }
-                    if (!aiReplies.length) return null;
-
-                    const targets = aiReplies.slice(-r);
-                    const firstTarget = targets[0];
-                    const lastTarget = targets[targets.length - 1];
-
-                    let startEl = firstTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || firstTarget;
-                    if (startEl && startEl.previousElementSibling) {
-                        const prev = startEl.previousElementSibling;
-                        if (prev.querySelector('[class*="send-msg-bubble"], [class*="user"], [data-role="user"]')
-                            || (prev.innerText || '').length > 0) {
-                            startEl = prev;
-                        }
-                    }
-                    let endEl = lastTarget.closest('[class*="v_list_row"], [class*="chat-message"]') || lastTarget;
-
-                    try { startEl.scrollIntoView({ block: 'start' }); } catch(e) {}
-
-                    const startRect = startEl.getBoundingClientRect();
-                    const endRect = endEl.getBoundingClientRect();
-
-                    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
-                    const top = Math.max(0, startRect.top + scrollY);
-                    const bottom = endRect.bottom + scrollY;
-                    const height = Math.max(120, bottom - top);
-                    const width = document.documentElement.scrollWidth || window.innerWidth || 1280;
-
-                    return { x: 0, y: top, width: width, height: height };
-                }""",
-                num,
-            )
+            await self._page.wait_for_timeout(self.expand_wait_ms)
+            clip_info = await self._page.evaluate(ROUNDS_CLIP_SCRIPT, max(1, rounds))
             if not clip_info:
                 # 无法按元素定位轮次时退回视口截图
                 return await self._viewport_shot()
@@ -854,24 +924,20 @@ class PageActions:
             base_y = float(clip_info.get("y") or 0)
 
             raw_pieces: list[bytes] = []
-            if height <= self._max_screenshot_height:
-                clip = {"x": 0, "y": base_y, "width": width, "height": height}
-                data = await self._page.screenshot(type="png", clip=clip)
-                raw_pieces.append(data)
-            else:
-                offset = 0
-                while offset < height:
-                    piece_h = min(self._max_screenshot_height, height - offset)
-                    clip = {"x": 0, "y": base_y + offset, "width": width, "height": piece_h}
-                    data = await self._page.screenshot(type="png", clip=clip)
-                    raw_pieces.append(data)
-                    offset += piece_h
+            for offset, piece_h in self._screenshot_sections(height):
+                raw_pieces.append(
+                    await self._clip_shot(
+                        {"x": 0, "y": base_y + offset, "width": width, "height": piece_h}
+                    )
+                )
 
             if not raw_pieces:
                 return await self._viewport_shot()
             return await self._encode_png_pieces(raw_pieces, width=width)
         except Exception:  # noqa: BLE001 - 异常退回视口截图
             return await self._viewport_shot()
+        finally:
+            await self._restore_after_capture(saved)
 
     async def get_snapshot_meta(self, scope: str = "viewport", rounds: int = 1) -> dict[str, Any]:
         """提取当前截图画面的内容摘要与截断感知状态。

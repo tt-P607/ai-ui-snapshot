@@ -62,6 +62,10 @@ class BrowserActions(PageActions):
     active_title_script: str = ACTIVE_CONVERSATION_TITLE_SCRIPT
     active_id_script: str = ACTIVE_CONVERSATION_ID_SCRIPT
     fingerprint_script: str = FINGERPRINT_SCRIPT
+    expand_script: str = EXPAND_SCRIPT
+    restore_script: str = RESTORE_SCRIPT
+    expand_arg: Any = CONVERSATION_SELECTOR
+    expand_wait_ms: int = 150
 
     def __init__(
         self,
@@ -401,7 +405,6 @@ class BrowserActions(PageActions):
                     expand_arg=CONVERSATION_SELECTOR,
                     wait_ms=150,
                 )
-
             # 默认正常视窗截图（滚动到最新消息位置）
             try:
                 await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")

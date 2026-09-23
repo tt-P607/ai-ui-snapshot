@@ -14,26 +14,44 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseTool
 
 from ..config import AiUiSnapshotConfig
 from ..services.base.browser_session import get_manager
+from ..services.deepseek.actions import BrowserActions
+from ..services.delivery import send_snapshot_pieces
 from ..services.service import (
     AskResult,
     ask_deepseek,
     capture_snapshot,
     create_share,
     resolve_media_path,
-    strip_data_uri_prefix,
 )
 from .base import _ToolBase
 
 logger = get_logger("ai_ui_snapshot.tool")
 
 
-class AskAiAndSnapshotTool(_ToolBase):
+class _DeepSeekToolBase(_ToolBase):
+    """获取当前聊天流的 DeepSeek 页面动作。"""
+
+    async def _actions(self) -> BrowserActions:
+        """获取并触碰当前 DeepSeek 会话。"""
+        stream_id = self.get_current_stream_id()
+        manager = get_manager()
+        session = await manager.get(stream_id)
+        manager.touch(stream_id)
+        return BrowserActions(
+            session.page,
+            max_screenshot_height=manager.max_screenshot_height,
+            decoration_enabled=manager.decoration_enabled,
+            decoration_theme=manager.decoration_theme,
+            decoration_avatar_url=manager.decoration_avatar_url,
+        )
+
+
+class AskAiAndSnapshotTool(_DeepSeekToolBase):
     """向 DeepSeek 真实提问，返回回复内容供内部消化转述。"""
 
     name: str = "ask_deepseek"
@@ -123,7 +141,7 @@ class AskAiAndSnapshotTool(_ToolBase):
         }
 
 
-class DeepseekSnapshotTool(_ToolBase):
+class DeepseekSnapshotTool(_DeepSeekToolBase):
     """直接截取 DeepSeek 对话界面并发送，不提问。"""
 
     name: str = "deepseek_snapshot"
@@ -170,18 +188,9 @@ class DeepseekSnapshotTool(_ToolBase):
         )
         if not result.ok:
             return False, result.error or "截图失败"
-        if not result.data_uri:
-            return False, "截图失败"
-        for piece in result.data_uri:
-            if not piece.startswith("data:"):
-                return False, "截图失败"
-            sent = await send_api.send_image(
-                strip_data_uri_prefix(piece),
-                stream_id,
-                processed_plain_text="[DeepSeek 界面截图]",
-            )
-            if not sent:
-                return False, "截图已生成但发送失败"
+        error = await send_snapshot_pieces(result.data_uri, stream_id, "DeepSeek")
+        if error:
+            return False, error
         res: dict[str, Any] = {
             "sent": True,
             "conversation": result.conversation,
@@ -194,7 +203,7 @@ class DeepseekSnapshotTool(_ToolBase):
         return True, res
 
 
-class DeepseekShareTool(_ToolBase):
+class DeepseekShareTool(_DeepSeekToolBase):
     """直接获取 DeepSeek 当前/指定对话的官方公开分享链接，不提问。"""
 
     name: str = "deepseek_share"
@@ -238,7 +247,7 @@ class DeepseekShareTool(_ToolBase):
         }
 
 
-class DeepseekHistoryTool(_ToolBase):
+class DeepseekHistoryTool(_DeepSeekToolBase):
     """DeepSeek 历史会话：列出 / 进入。"""
 
     name: str = "deepseek_history"
@@ -292,7 +301,7 @@ class DeepseekHistoryTool(_ToolBase):
         return False, f"未知操作: {action}（可选 list/open）"
 
 
-class DeepseekStateTool(_ToolBase):
+class DeepseekStateTool(_DeepSeekToolBase):
     """查询 DeepSeek 当前对话的深度思考/智能搜索开关状态。"""
 
     name: str = "deepseek_state"

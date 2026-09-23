@@ -65,6 +65,10 @@ class GeminiActions(PageActions):
     conversation_selector: str = CONVERSATION_SELECTOR
     visibility_script: str = VISIBILITY_SCRIPT
     generating_script: str = GENERATING_SCRIPT
+    expand_script: str = GEMINI_FULLPAGE_EXPAND_SCRIPT
+    restore_script: str = RESTORE_SCRIPT
+    expand_saved_key: str = "saved"
+    expand_wait_ms: int = 400
     poll_interval_s: float = POLL_INTERVAL_S
     conversation_text_script: str = CONVERSATION_TEXT_SCRIPT
     active_title_script: str = ACTIVE_CONVERSATION_TITLE_SCRIPT

@@ -15,17 +15,17 @@
 
 from __future__ import annotations
 
-from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseCommand, cmd_route
 from src.app.plugin_system.types import PermissionLevel
 
 from ..config import AiUiSnapshotConfig
+from ..services.delivery import send_snapshot_pieces
+from ..services.sites import site_enabled
 from ..services.service import (
     ask_deepseek,
     ask_doubao,
     ask_gemini,
-    strip_data_uri_prefix,
 )
 
 logger = get_logger("ai_ui_snapshot.command")
@@ -145,6 +145,8 @@ class AiSnapshotCommand(BaseCommand):
         config = self.plugin.config if isinstance(self.plugin.config, AiUiSnapshotConfig) else None
         if config is None:
             return False, "插件配置缺失，无法执行"
+        if not site_enabled(config, site):
+            return False, f"站点 {site} 未启用"
 
         if site == "gemini":
             return await self._handle_gemini(body, mode, deepthink, return_scope, new_chat, conversation, config)
@@ -201,19 +203,9 @@ class AiSnapshotCommand(BaseCommand):
         )
         if not result.ok:
             return False, result.error or "生成截图失败"
-        if not result.data_uri:
-            return False, "生成截图失败"
-
-        for piece in result.data_uri:
-            if not piece.startswith("data:"):
-                return False, "生成截图失败"
-            sent = await send_api.send_image(
-                strip_data_uri_prefix(piece),
-                self.stream_id,
-                processed_plain_text="[DeepSeek 界面截图]",
-            )
-            if not sent:
-                return False, "截图已生成但发送失败"
+        error = await send_snapshot_pieces(result.data_uri, self.stream_id, "DeepSeek", invalid_error="生成截图失败")
+        if error:
+            return False, error
 
         return True, f"已生成 {result.model_name} 界面截图并发送。"
 
@@ -259,19 +251,9 @@ class AiSnapshotCommand(BaseCommand):
         )
         if not result.ok:
             return False, result.error or "生成截图失败"
-        if not result.data_uri:
-            return False, "生成截图失败"
-
-        for piece in result.data_uri:
-            if not piece.startswith("data:"):
-                return False, "生成截图失败"
-            sent = await send_api.send_image(
-                strip_data_uri_prefix(piece),
-                self.stream_id,
-                processed_plain_text="[Gemini 界面截图]",
-            )
-            if not sent:
-                return False, "截图已生成但发送失败"
+        error = await send_snapshot_pieces(result.data_uri, self.stream_id, "Gemini", invalid_error="生成截图失败")
+        if error:
+            return False, error
 
         return True, f"已生成 {result.model_name} 界面截图并发送。"
 
@@ -311,18 +293,8 @@ class AiSnapshotCommand(BaseCommand):
         )
         if not result.ok:
             return False, result.error or "生成截图失败"
-        if not result.data_uri:
-            return False, "生成截图失败"
-
-        for piece in result.data_uri:
-            if not piece.startswith("data:"):
-                return False, "生成截图失败"
-            sent = await send_api.send_image(
-                strip_data_uri_prefix(piece),
-                self.stream_id,
-                processed_plain_text="[豆包界面截图]",
-            )
-            if not sent:
-                return False, "截图已生成但发送失败"
+        error = await send_snapshot_pieces(result.data_uri, self.stream_id, "豆包", invalid_error="生成截图失败")
+        if error:
+            return False, error
 
         return True, f"已生成 {result.model_name} 界面截图并发送。"

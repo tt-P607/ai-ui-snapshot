@@ -18,12 +18,19 @@ from .config import AiUiSnapshotConfig
 from .commands.ask_command import AiSnapshotCommand
 from .event_handler import EVENT_HANDLERS
 from .services.base import browser_session
+from .services.sites import site_enabled
 from .tools.deepseek_tools import DEEPSEEK_TOOLS
 from .tools.doubao_tools import DOUBAO_TOOLS
 from .tools.gemini_tools import GEMINI_TOOLS
 from .tools.recovery_tool import RECOVERY_TOOLS
 
 logger = log_api.get_logger("ai_ui_snapshot")
+
+SITE_TOOLS = {
+    "deepseek": DEEPSEEK_TOOLS,
+    "gemini": GEMINI_TOOLS,
+    "doubao": DOUBAO_TOOLS,
+}
 
 
 @register_plugin
@@ -89,21 +96,14 @@ class AiUiSnapshotPlugin(BasePlugin):
                 AiSnapshotCommand,
             ]
         components: list[type] = []
-        any_site = False
-        if config.sites.deepseek:
-            components.extend(DEEPSEEK_TOOLS)
-            any_site = True
-        if config.sites.gemini:
-            components.extend(GEMINI_TOOLS)
-            any_site = True
-        if config.sites.doubao:
-            components.extend(DOUBAO_TOOLS)
-            any_site = True
+        for site, tools in SITE_TOOLS.items():
+            if site_enabled(config, site):
+                components.extend(tools)
         # 识图接管：需开启接管且所配站点已启用
         recognize_site = (config.recognize.site or "").strip().lower()
-        if config.recognize.enabled and getattr(config.sites, recognize_site, False):
+        if config.recognize.enabled and site_enabled(config, recognize_site):
             components.extend(EVENT_HANDLERS)
         # /ask 命令与恢复工具随任一站点启用注册，不绑定具体站点
-        if any_site:
+        if any(site_enabled(config, site) for site in SITE_TOOLS):
             components.extend([*RECOVERY_TOOLS, AiSnapshotCommand])
         return components

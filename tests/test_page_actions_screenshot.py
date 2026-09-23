@@ -14,7 +14,10 @@ for import_root in (_PLUGIN_ROOT, _PROJECT_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from services.base.page_actions import PageActions  # noqa: E402
+from services.base.page_actions import (  # noqa: E402
+    ROUNDS_CLIP_SCRIPT,
+    PageActions,
+)
 from services.gemini.actions import GeminiActions  # noqa: E402
 
 
@@ -25,6 +28,7 @@ class FakePage:
         self.expand_result = expand_result
         self.evaluate_calls: list[tuple[str, object]] = []
         self.waits: list[int] = []
+        self.screenshot_calls: list[dict[str, object]] = []
 
     async def evaluate(self, script: str, arg: object = None) -> object:
         """返回展开结果并记录恢复参数。"""
@@ -36,6 +40,11 @@ class FakePage:
     async def wait_for_timeout(self, milliseconds: int) -> None:
         """记录页面重排等待时间。"""
         self.waits.append(milliseconds)
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        """记录截图参数并返回最小 PNG 替身。"""
+        self.screenshot_calls.append(kwargs)
+        return b"png"
 
 
 @pytest.mark.asyncio
@@ -137,3 +146,83 @@ async def test_wait_reply_done_ignores_previous_reply_after_reasoning() -> None:
     assert done is True
     assert reply == "本轮正式回复"
     assert actions.get_conversation_text.await_count == 9
+
+
+@pytest.mark.asyncio
+async def test_rounds_shot_clips_with_full_page() -> None:
+    """轮次裁切必须整页截取，否则超出视口的内容会被丢弃。"""
+    page = FakePage(None)
+    page.evaluate = AsyncMock(
+        return_value={"x": 0, "y": 120, "width": 1440, "height": 2600}
+    )
+    actions = PageActions(page, max_screenshot_height=1000, decoration_enabled=False)
+
+    await actions._rounds_shot(rounds=2)
+    assert [call["clip"]["height"] for call in page.screenshot_calls] == [867, 867, 866]
+    assert [call["clip"]["y"] for call in page.screenshot_calls] == [120, 987, 1854]
+    assert all(call["full_page"] is True for call in page.screenshot_calls)
+
+
+@pytest.mark.asyncio
+async def test_rounds_shot_keeps_single_shot_within_limit() -> None:
+    """未超上限时轮次裁切只截一张，且仍为整页裁切。"""
+    page = FakePage(None)
+    page.evaluate = AsyncMock(
+        return_value={"x": 0, "y": 60, "width": 1440, "height": 700}
+    )
+    actions = PageActions(page, max_screenshot_height=1000, decoration_enabled=False)
+
+    await actions._rounds_shot(rounds=1)
+
+    assert page.screenshot_calls == [
+        {
+            "type": "png",
+            "full_page": True,
+            "clip": {"x": 0, "y": 60, "width": 1440, "height": 700},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rounds_shot_expands_and_restores_page() -> None:
+    """轮次裁切应先撑开页面（内部滚动容器需撑开才能量到真实高度）再恢复。"""
+    page = FakePage({"saved": [{"path": "main"}]})
+    calls: list[str] = []
+
+    async def evaluate(script: str, arg: object = None) -> object:
+        calls.append(script)
+        if script == "expand":
+            return page.expand_result
+        if script == ROUNDS_CLIP_SCRIPT:
+            return {"x": 0, "y": 0, "width": 1440, "height": 2000}
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    actions = PageActions(page, max_screenshot_height=1000, decoration_enabled=False)
+    actions.expand_script = "expand"
+    actions.restore_script = "restore"
+    actions.expand_saved_key = "saved"
+    actions.expand_wait_ms = 0
+
+    await actions._rounds_shot(rounds=1)
+
+    assert calls[0] == "expand"
+    assert calls[-1] == "restore"
+    assert [call["clip"]["height"] for call in page.screenshot_calls] == [1000, 1000]
+
+
+@pytest.mark.asyncio
+async def test_fullpage_shots_balances_short_final_piece() -> None:
+    """末张不应因为贪心裁切只剩一个孤立的页脚。"""
+    page = FakePage(None)
+
+    async def evaluate(script: str, arg: object = None) -> int:
+        return 1956 if "scrollHeight" in script else 1440
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    actions = PageActions(page, max_screenshot_height=1600, decoration_enabled=False)
+
+    await actions._fullpage_shots()
+
+    assert [call["clip"]["height"] for call in page.screenshot_calls] == [978, 978]
+    assert [call["clip"]["y"] for call in page.screenshot_calls] == [0, 978]

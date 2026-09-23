@@ -35,6 +35,7 @@ from src.app.plugin_system.base import BaseTool
 from ..config import AiUiSnapshotConfig
 
 from ..services.base.browser_session import get_manager
+from ..services.delivery import send_snapshot_pieces
 
 from ..services.service import (
     AskResult,
@@ -42,7 +43,6 @@ from ..services.service import (
     capture_doubao_snapshot,
     download_doubao_chat_images,
     generate_doubao_image,
-    strip_data_uri_prefix,
     submit_doubao_video,
 )
 
@@ -290,22 +290,9 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
 
         if not result.ok:
             return False, result.error or "截图失败"
-
-        if not result.data_uri:
-            return False, "截图失败"
-
-        for piece in result.data_uri:
-            if not piece.startswith("data:"):
-                return False, "截图失败"
-
-            sent = await send_api.send_image(
-                strip_data_uri_prefix(piece),
-                stream_id,
-                processed_plain_text="[豆包界面截图]",
-            )
-
-            if not sent:
-                return False, "截图已生成但发送失败"
+        error = await send_snapshot_pieces(result.data_uri, stream_id, "豆包")
+        if error:
+            return False, error
 
         res: dict[str, Any] = {
             "sent": True,

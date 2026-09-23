@@ -296,10 +296,16 @@ SKILL_ACTIVE_SCRIPT = """(placeholder) => {
 # 验证层由字节验证中心以 iframe 加载（rmc.bytedance.com/verifycenter/captcha），
 # 其文案在主文档 innerText 中取不到，故以可见的验证 iframe 为主要判据，
 # 主文档文案作为站点改用同文档渲染时的兜底。
+# 注意：iframe 判定必须同时校验真实可见性 —— getBoundingClientRect 对
+# visibility:hidden / opacity:0 的元素仍返回真实尺寸（只有 display:none 为 0），
+# 而豆包会预加载隐藏的 iframe（如 drive-iframe 实测 1440x900 + visibility:hidden），
+# 只比尺寸会把隐藏预加载误判成"弹了验证"。
 CAPTCHA_SCRIPT = """() => {
     for (const f of document.querySelectorAll('iframe')) {
         const src = f.getAttribute('src') || '';
         if (!/verifycenter\\/captcha|rmc\\.bytedance\\.com/.test(src)) continue;
+        const cs = getComputedStyle(f);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
         const r = f.getBoundingClientRect();
         if (r.width > 50 && r.height > 50) return '图片选择验证';
     }

@@ -29,11 +29,11 @@ from src.app.plugin_system.types import EventType
 
 from ..config import AiUiSnapshotConfig
 from ..services.service import (
-    RECOGNIZE_SITES,
     recognize_image_by_site,
     resolve_media_path,
     sniff_image_suffix,
 )
+from ..services.sites import SITE_NAMES, site_enabled
 
 logger = get_logger("ai_ui_snapshot.media_recognize")
 
@@ -89,10 +89,10 @@ class ImageRecognizeHandler(BaseEventHandler):
             return EventDecision.PASS, params
 
         site = (config.recognize.site or "").strip().lower()
-        if site not in RECOGNIZE_SITES:
+        if site not in SITE_NAMES:
             logger.warning(f"识图站点配置无效: {config.recognize.site!r}，交回框架内置 VLM")
             return EventDecision.PASS, params
-        if not getattr(config.sites, site, False):
+        if not site_enabled(config, site):
             logger.info(f"识图站点 {site} 未在 [sites] 启用，交回框架内置 VLM")
             return EventDecision.PASS, params
 
