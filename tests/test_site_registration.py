@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -49,3 +50,17 @@ def test_site_registration_tracks_enabled_config(site: str, expected: list[type]
 def test_site_registry_matches_config_fields() -> None:
     """新增站点时配置字段与站点列表必须同步。"""
     assert set(SITE_NAMES) == set(AiUiSnapshotConfig.SitesSection.model_fields)
+
+
+@pytest.mark.asyncio
+async def test_plugin_unload_closes_browser_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """插件卸载时调用框架约定的生命周期钩子释放浏览器。"""
+    close_all = AsyncMock()
+    monkeypatch.setattr(
+        "plugins.ai_ui_snapshot.plugin.browser_session.close_all_sessions",
+        close_all,
+    )
+
+    await AiUiSnapshotPlugin(AiUiSnapshotConfig()).on_plugin_unloaded()
+
+    close_all.assert_awaited_once()

@@ -10,7 +10,7 @@
 （``BrowserSessionManager``）做一次无头校验：确认站点就绪并保存账号资产。
 
 配置读同一份：``config/plugins/ai_ui_snapshot/config.toml``（经插件配置类加载），
-登录态目录 / 代理 / 浏览器路径都跟随插件配置，不另写默认值。
+登录态目录和浏览器路径跟随插件配置；Gemini 使用配置代理，其他站点直连。
 """
 
 from __future__ import annotations
@@ -209,7 +209,7 @@ async def run_login_flow(
     profile = site_profile_dir(config, site)
     profile.mkdir(parents=True, exist_ok=True)
     browser = resolve_browser_path(config.screenshot.browser_path)
-    proxy = (config.web.proxy_url or "").strip()
+    proxy = (config.web.proxy_url or "").strip() if site == "gemini" else ""
 
     print(f"== {site} 登录 ==")
     print(f"  登录态目录: {profile}")

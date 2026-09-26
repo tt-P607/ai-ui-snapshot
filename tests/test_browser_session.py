@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from services.base.browser_session import (  # noqa: E402
     BrowserSessionManager,
     SiteBrowser,
 )
+from services.base import browser_session as browser_session_module  # noqa: E402
 
 
 class FakePage:
@@ -70,6 +72,46 @@ class FakePlaywright:
     async def stop(self) -> None:
         """停止 Playwright。"""
         self.stopped = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("site", "uses_proxy"),
+    [("gemini", True), ("doubao", False), ("deepseek", False)],
+)
+async def test_proxy_only_applies_to_gemini(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site: str,
+    uses_proxy: bool,
+) -> None:
+    """Gemini 使用配置代理，国内站点保持直连。"""
+    launch = AsyncMock(return_value=FakeContext())
+    playwright = SimpleNamespace(
+        chromium=SimpleNamespace(launch_persistent_context=launch),
+        stop=AsyncMock(),
+    )
+    factory = MagicMock(return_value=SimpleNamespace(start=AsyncMock(return_value=playwright)))
+    monkeypatch.setattr("playwright.async_api.async_playwright", factory)
+    monkeypatch.setattr(
+        browser_session_module,
+        "resolve_browser_path",
+        MagicMock(return_value=""),
+    )
+    manager = BrowserSessionManager(
+        profile_root=str(tmp_path),
+        proxy_url="http://proxy.example:8080",
+    )
+
+    site_browser = await manager._launch_site_browser(site)
+    launch_kwargs = launch.await_args.kwargs
+    if uses_proxy:
+        assert launch_kwargs["proxy"] == {"server": "http://proxy.example:8080"}
+    else:
+        assert "proxy" not in launch_kwargs
+
+    await site_browser.context.close()
+    await site_browser.playwright.stop()
 
 
 @pytest.mark.asyncio

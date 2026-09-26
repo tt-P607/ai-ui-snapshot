@@ -29,6 +29,7 @@ from .constants import (
     CAPTCHA_SCRIPT,
     CONVERSATION_SELECTOR,
     CONVERSATION_TEXT_SCRIPT,
+    DOWNLOAD_PROMO_DISMISS_SCRIPT,
     GENERATING_SCRIPT,
     GET_MODEL_SCRIPT,
     GET_THEME_SCRIPT,
@@ -230,6 +231,7 @@ class DoubaoActions(PageActions):
             bool: 是否成功。
         """
         try:
+            await self.dismiss_download_promo()
             loc = self._page.get_by_text(NEW_CHAT_TEXT, exact=False)
             count = await loc.count()
             for i in range(count):
@@ -283,6 +285,7 @@ class DoubaoActions(PageActions):
         if not want:
             return False
         try:
+            await self.dismiss_download_promo()
             # 1. 已在目标会话：直接成功（重复点击同一项没有意义）
             if (await self.get_active_conversation_title()) == want:
                 return True
@@ -485,6 +488,7 @@ class DoubaoActions(PageActions):
         """
         page = self._page
         try:
+            await self.dismiss_download_promo()
             editor = page.locator(INPUT_SELECTOR).first
             if await editor.count() == 0:
                 return False, "未找到豆包输入框（可能未登录或页面未就绪）"
@@ -574,6 +578,7 @@ class DoubaoActions(PageActions):
         Returns:
             list[str]: PNG data URI 列表；失败返回空列表。
         """
+        await self.dismiss_download_promo()
         if scope == "rounds" or rounds > 1:
             return await self._rounds_shot(rounds=rounds)
         if scope == "full":
@@ -777,11 +782,26 @@ class DoubaoActions(PageActions):
         while _aio.get_running_loop().time() < deadline:
             try:
                 if bool(await self._page.evaluate(READY_CHECK_SCRIPT, args)):
+                    await self.dismiss_download_promo()
                     return True
             except Exception:  # noqa: BLE001 - 页面未就绪
                 pass
             await _aio.sleep(2.0)
         return False
+
+    async def dismiss_download_promo(self) -> bool:
+        """关闭遮住对话区域的客户端下载推广弹窗。
+
+        Returns:
+            bool: 是否识别并关闭弹窗。
+        """
+        try:
+            dismissed = bool(await self._page.evaluate(DOWNLOAD_PROMO_DISMISS_SCRIPT))
+            if dismissed:
+                await self._page.wait_for_timeout(250)
+            return dismissed
+        except Exception:  # noqa: BLE001 - 页面尚未就绪
+            return False
 
     async def activate_skill(self, skill_id: str, placeholder: str) -> tuple[bool, str]:
         """激活输入区技能（点击技能按钮并确认受理）。

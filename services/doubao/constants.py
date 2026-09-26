@@ -74,6 +74,21 @@ READY_INPUT_SELECTOR = (
 READY_TEXT_MARKERS: tuple[str, ...] = ("新对话", "有什么我能帮你的吗", "发消息")
 LOGIN_BUTTON_TEXT = "登录"
 
+# 登录后偶发的客户端下载推广弹窗会遮住输入区和侧栏。
+DOWNLOAD_PROMO_DISMISS_SCRIPT = """() => {
+    const button = Array.from(document.querySelectorAll('button')).find(el =>
+        (el.innerText || '').replace(/\\s+/g, ' ').trim() === '下次提醒我');
+    if (!button || !button.getClientRects().length) return false;
+    for (let parent = button.parentElement, depth = 0;
+         parent && depth < 8; parent = parent.parentElement, depth++) {
+        if ((parent.innerText || '').includes('下载电脑版')) {
+            button.click();
+            return true;
+        }
+    }
+    return false;
+}"""
+
 # 等待 AI 回复完成的轮询间隔（秒）
 POLL_INTERVAL_S = 2.0
 

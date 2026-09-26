@@ -67,7 +67,7 @@ class AiUiSnapshotPlugin(BasePlugin):
                 decoration_avatar_url=config.decoration.avatar_url,
             )
 
-    async def on_plugin_unload(self) -> None:
+    async def on_plugin_unloaded(self) -> None:
         """插件卸载时关闭所有浏览器会话。"""
         await browser_session.close_all_sessions()
 

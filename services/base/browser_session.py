@@ -579,7 +579,7 @@ class BrowserSessionManager:
                 launch_kwargs["user_agent"] = real_ua
         if browser_path:
             launch_kwargs["executable_path"] = browser_path
-        if self._proxy_url:
+        if self._proxy_url and theme == "gemini":
             launch_kwargs["proxy"] = {"server": self._proxy_url}
         try:
             context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
