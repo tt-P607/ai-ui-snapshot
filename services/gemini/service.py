@@ -110,7 +110,7 @@ async def ask_gemini(
             return AskResult(ok=False, error=err)
 
         # 2. 设置模型：Gemini 不锁定模型，每次可切换。model 为空时默认用
-        #    Flash 家族（set_model 按关键词匹配网页当前版本，已在该家族时跳过）。
+        #    Flash 家族（set_model 按当前菜单可用项选择最高版本）。
         want_model = (model or "").strip() or "Flash"
         ok, msg = await actions.set_model(want_model)
         if not ok:

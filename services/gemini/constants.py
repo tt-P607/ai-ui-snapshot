@@ -1,6 +1,6 @@
 """Gemini (Google AI) 站点专属常量、选择器与页面脚本。
 
-依据对已登录 gemini.google.com 网页的真实 DOM 探测（免费账号 UI）整理：
+依据对已登录 gemini.google.com 网页的真实 DOM 探测整理（含不同账号布局）：
 - 输入框：``div.ql-editor[contenteditable="true"]``（aria-label="为 Gemini 输入提示"）
 - 发送按钮：``button[aria-label="发送"]``（输入后出现）
 - 停止按钮：``button[aria-label="停止回答"]``（生成中出现）
@@ -202,7 +202,12 @@ HISTORY_OPEN_SCRIPT = """(title) => {
 # 新对话入口（点击"发起新对话"）
 NEW_CHAT_SCRIPT = """() => {
     const links = Array.from(document.querySelectorAll('a[aria-label="发起新对话"], a[aria-label*="新对话"]'));
-    if (links.length > 0) { links[0].click(); return true; }
+    const visible = links.find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && !el.closest('[aria-hidden="true"]');
+    });
+    const pick = visible || links[0];
+    if (pick) { pick.click(); return true; }
     return false;
 }"""
 # 会话指纹脚本（消息数 + 当前 URL，用于校验 open_conversation 是否真正切换）
@@ -265,7 +270,12 @@ CONVERSATION_TEXT_SCRIPT = """(scope) => {
 
 # 当前模式（模型）提取脚本：从模式选择器按钮 aria-label 中取"当前模式为"引号内文案。
 GET_MODEL_SCRIPT = """() => {
-    const btn = document.querySelector("button[aria-label*='打开模式选择器'], .input-area-switch");
+    const btn = Array.from(document.querySelectorAll(
+        "button[aria-label*='打开模式选择器'], .input-area-switch"
+    )).find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && !el.closest('[aria-hidden="true"]');
+    });
     if (!btn) return null;
     const aria = btn.getAttribute('aria-label') || '';
     const m = aria.match(/当前模式为[“\"']?([^”\"']+)/);
@@ -274,7 +284,12 @@ GET_MODEL_SCRIPT = """() => {
 
 # 打开模式选择器菜单脚本：点击触发按钮。
 OPEN_MODEL_MENU_SCRIPT = """() => {
-    const btn = document.querySelector("button[aria-label*='打开模式选择器'], .input-area-switch");
+    const btn = Array.from(document.querySelectorAll(
+        "button[aria-label*='打开模式选择器'], .input-area-switch"
+    )).find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && !el.closest('[aria-hidden="true"]');
+    });
     if (!btn) return false;
     btn.click();
     return true;
@@ -296,7 +311,13 @@ SET_MODEL_SCRIPT = """(key) => {
         return t.includes(want);
     };
     const items = Array.from(document.querySelectorAll("[role='menuitem'], [role='menuitemradio']"));
-    const pick = items.find(el => match(norm(el.innerText)) || match(norm(el.getAttribute('aria-label'))));
+    const pick = items.find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0
+            && el.getAttribute('aria-disabled') !== 'true'
+            && !el.closest('[aria-hidden="true"]')
+            && (match(norm(el.innerText)) || match(norm(el.getAttribute('aria-label'))));
+    });
     if (!pick) return false;
     pick.click();
     return true;
@@ -322,11 +343,11 @@ GET_THEME_SCRIPT = """() => {
     return body.classList.contains('dark-theme') ? 'dark' : 'light';
 }"""
 
-# 查询模型关键词对应的菜单项（返回在菜单中的索引、实际文本与选中态）。
-# 同家族多版本并存时取版本号最高项；版本号解析不出时保持菜单顺序。
+# 查询当前账号可见的模型选项，按模型族取最高版本与真实选中态。
 MODEL_ITEM_SELECTED_SCRIPT = """(key) => {
     const want = (key || '').trim().toLowerCase();
-    if (!want) return {hit: false, index: -1, text: '', selected: false};
+    const empty = {hit: false, index: -1, text: '', selected: false, available: []};
+    if (!want) return empty;
     const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
     const isLite = (t) => /flash[\\s-]*lite/.test(t);
     const match = (t) => {
@@ -337,26 +358,46 @@ MODEL_ITEM_SELECTED_SCRIPT = """(key) => {
         return t.includes(want);
     };
     const items = Array.from(document.querySelectorAll("[role='menuitem'], [role='menuitemradio']"));
+    const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || el.getAttribute('aria-disabled') === 'true') return false;
+        for (let node = el; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (node.hidden || node.getAttribute('aria-hidden') === 'true'
+                || style.display === 'none' || style.visibility === 'hidden'
+                || style.opacity === '0') return false;
+        }
+        return true;
+    };
     const hits = [];
+    const available = [];
     for (let i = 0; i < items.length; i++) {
         const el = items[i];
-        if (match(norm(el.innerText)) || match(norm(el.getAttribute('aria-label')))) {
+        if (!visible(el)) continue;
+        const text = norm(el.innerText);
+        if (isLite(text) || /\\bflash\\b/.test(text) || /\\bpro\\b/.test(text)) {
+            available.push((el.innerText || '').replace(/\\s+/g, ' ').trim());
+        }
+        if (match(text) || match(norm(el.getAttribute('aria-label')))) {
             hits.push({index: i, el: el});
         }
     }
-    if (!hits.length) return {hit: false, index: -1, text: '', selected: false};
+    if (!hits.length) return {...empty, available};
     const verOf = (el) => {
         const m = norm(el.innerText).match(/(\\d+(?:\\.\\d+)?)/);
         return m ? parseFloat(m[1]) : -1;
     };
     hits.sort((a, b) => verOf(b.el) - verOf(a.el));
     const pick = hits[0];
-    const cls = (pick.el.className && typeof pick.el.className === 'string') ? pick.el.className : '';
+    const checked = pick.el.getAttribute('aria-checked');
     return {
         hit: true,
         index: pick.index,
         text: (pick.el.innerText || '').replace(/\\s+/g, ' ').trim(),
-        selected: cls.includes('selected') || cls.includes('active'),
+        selected: checked !== null ? checked === 'true'
+            : pick.el.classList.contains('selected')
+                || Boolean(pick.el.querySelector('[aria-label="已选中"], [aria-label="Selected"]')),
+        available,
     };
 }"""
 # 扩展思考开关：返回可见菜单项的选中态；菜单未展开时返回 null

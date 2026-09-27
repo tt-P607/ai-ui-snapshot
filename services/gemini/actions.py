@@ -43,7 +43,6 @@ from .constants import (
     SET_MODEL_SCRIPT,
     SET_THEME_SCRIPT,
     SHARE_LINK_READY_SCRIPT,
-    SUPPORTED_MODELS,
     RESTORE_SCRIPT,
     THINKING_ITEM,
     THINKING_SELECTED_SCRIPT,
@@ -250,11 +249,10 @@ class GeminiActions(PageActions):
             return False, f"设置扩展思考失败: {exc}"
 
     async def set_model(self, model: str) -> tuple[bool, str]:
-        """切换 Gemini 对话模型（不改变"扩展思考"开关状态）。
+        """按当前账号实际可用的模型选项切换 Gemini 对话模型。
 
-        按家族关键词（Flash / Flash-Lite / Pro）匹配菜单项，与网页版本号解耦：
-        菜单为 3.6 Flash / 3.7 Flash 时 "Flash" 均命中，同家族多版本并存时
-        取版本号最高项。当前已在该家族时直接返回成功（不做无谓切换）。
+        按家族关键词匹配菜单中当前可见且可选的选项；同家族有多个版本时
+        选择最高版本。菜单位置由页面决定，不改变"扩展思考"开关状态。
 
         Args:
             model: 目标模型族关键词（Flash / Flash-Lite / Pro）；传"扩展思考"
@@ -271,30 +269,52 @@ class GeminiActions(PageActions):
             return False, "扩展思考是独立开关，请用 set_thinking 控制"
         page = self._page
         try:
-            # 1. 已在目标族：无需切换（避免开菜单点击的无谓操作与失败面）
-            current = await self.get_model() or ""
-            if current and self.model_family(current) == key:
-                return True, current
-            # 2. 展开模式选择器
-            await page.evaluate(OPEN_MODEL_MENU_SCRIPT)
+            # 1. 以当前账号的菜单确定可用版本及选中态
+            if not await page.evaluate(OPEN_MODEL_MENU_SCRIPT):
+                return False, "未找到 Gemini 模型选择器"
             await page.wait_for_timeout(800)
-            # 3. 按关键词定位菜单项（取版本号最高项，索引与 DOM 顺序一致）
             state = await page.evaluate(MODEL_ITEM_SELECTED_SCRIPT, key)
             info = state if isinstance(state, dict) else {}
             if not info.get("hit"):
                 await page.keyboard.press("Escape")
-                return False, f"未找到模型: {normalized}（可选: {', '.join(SUPPORTED_MODELS)}）"
+                available = info.get("available") or []
+                if not available:
+                    return False, "未找到可用模型选项，请检查 Gemini 页面是否已加载"
+                return False, f"当前页面未提供模型: {normalized}（可用: {', '.join(available)}）"
+            if info.get("selected"):
+                await page.keyboard.press("Escape")
+                return True, str(info.get("text") or normalized)
+
+            # 2. 点击该账号可用的最高版本模型
             index = int(info.get("index") or 0)
             item = page.locator(MODEL_MENU_ITEM_SELECTOR).nth(index)
-            if await item.count() > 0:
-                await item.click(timeout=5000)
-            else:
-                await page.evaluate(SET_MODEL_SCRIPT, key)
+            if await item.count() == 0:
+                await page.keyboard.press("Escape")
+                return False, f"模型选项已消失: {normalized}"
+            await item.click(timeout=5000)
             await page.wait_for_timeout(1000)
-            # 4. 校验：菜单已关闭，用模式选择器按钮的模型名归一化比对
+
+            # 3. 页面切换模型后可能重绘按钮，等待菜单恢复再核对选中态
+            verified = None
+            for _ in range(12):
+                verified = await page.evaluate(MODEL_ITEM_SELECTED_SCRIPT, key)
+                if isinstance(verified, dict) and verified.get("hit"):
+                    break
+                if await page.evaluate(OPEN_MODEL_MENU_SCRIPT):
+                    await page.wait_for_timeout(700)
+                    verified = await page.evaluate(MODEL_ITEM_SELECTED_SCRIPT, key)
+                    if isinstance(verified, dict) and verified.get("hit"):
+                        break
+                await page.wait_for_timeout(500)
             after = await self.get_model() or ""
             await page.keyboard.press("Escape")
-            if after and self.model_family(after) == key:
+            if (
+                isinstance(verified, dict)
+                and verified.get("hit")
+                and verified.get("selected")
+                and after
+                and self.model_family(after) == key
+            ):
                 return True, after
             return False, f"切换模型失败，当前为: {after or '未知'}"
         except Exception as exc:  # noqa: BLE001 - 切换失败
