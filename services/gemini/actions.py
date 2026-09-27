@@ -174,17 +174,25 @@ class GeminiActions(PageActions):
     async def get_thinking(self) -> bool:
         """读取"扩展思考"（深度思考）开关是否开启。
 
-        优先用模式选择器按钮 aria-label（"当前模式为 Flash 扩展" 含"扩展"）判断，
-        菜单关闭后仍可读；菜单展开时回退菜单项选中态。
+        优先读取可见菜单项；菜单关闭且按钮未标记开启时，展开菜单读取。
 
         Returns:
             bool: 是否开启扩展思考。
         """
         try:
+            selected = await self._page.evaluate(THINKING_SELECTED_SCRIPT)
+            if isinstance(selected, bool):
+                return selected
             model = (await self.get_model()) or ""
             if "扩展" in model:
                 return True
-            return bool(await self._page.evaluate(THINKING_SELECTED_SCRIPT))
+            if not await self._page.evaluate(OPEN_MODEL_MENU_SCRIPT):
+                return False
+            try:
+                await self._page.wait_for_timeout(400)
+                return bool(await self._page.evaluate(THINKING_SELECTED_SCRIPT))
+            finally:
+                await self._page.keyboard.press("Escape")
         except Exception:  # noqa: BLE001 - 页面未就绪
             return False
 
@@ -204,8 +212,12 @@ class GeminiActions(PageActions):
             # 1. 展开模式选择器
             await page.evaluate(OPEN_MODEL_MENU_SCRIPT)
             await page.wait_for_timeout(800)
-            # 2. 读取当前扩展思考状态（菜单展开时读选中态最准）
-            current = bool(await page.evaluate(THINKING_SELECTED_SCRIPT))
+            # 2. 菜单已展开，直接读取可见菜单项的选中态
+            selected = await page.evaluate(THINKING_SELECTED_SCRIPT)
+            if not isinstance(selected, bool):
+                await page.keyboard.press("Escape")
+                return False, "未找到扩展思考菜单项"
+            current = selected
             if enable is None:
                 await page.keyboard.press("Escape")
                 return True, f"扩展思考: {'开启' if current else '关闭'}"
@@ -213,16 +225,24 @@ class GeminiActions(PageActions):
                 await page.keyboard.press("Escape")
                 return True, f"扩展思考: 已是{'开启' if enable else '关闭'}状态"
             # 3. 点击"扩展思考"菜单项切换
-            item = page.locator(MODEL_MENU_ITEM_SELECTOR).filter(has_text=THINKING_ITEM).first
+            item = page.locator(
+                "[role='menuitem']:visible, [role='menuitemradio']:visible"
+            ).filter(has_text=THINKING_ITEM).first
             if await item.count() > 0:
                 await item.click(timeout=5000)
             else:
                 await page.evaluate(SET_MODEL_SCRIPT, THINKING_ITEM)
             await page.wait_for_timeout(1200)
-            # 4. 校验：菜单可能已关闭，用 get_model 的"扩展"标记判断
-            now_model = (await self.get_model()) or ""
-            now = "扩展" in now_model
+            # 4. 菜单可能已关闭，重新展开后按选中标记校验
+            selected = await page.evaluate(THINKING_SELECTED_SCRIPT)
+            if not isinstance(selected, bool):
+                await page.evaluate(OPEN_MODEL_MENU_SCRIPT)
+                await page.wait_for_timeout(800)
+                selected = await page.evaluate(THINKING_SELECTED_SCRIPT)
             await page.keyboard.press("Escape")
+            if not isinstance(selected, bool):
+                return False, "无法读取扩展思考切换后的状态"
+            now = selected
             if now == enable:
                 return True, f"扩展思考: 已{'开启' if enable else '关闭'}"
             return False, f"扩展思考: 设置失败（当前{'开启' if now else '关闭'}）"

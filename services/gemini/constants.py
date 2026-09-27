@@ -359,13 +359,26 @@ MODEL_ITEM_SELECTED_SCRIPT = """(key) => {
         selected: cls.includes('selected') || cls.includes('active'),
     };
 }"""
-# 扩展思考开关：菜单项"扩展思考"当前是否选中
+# 扩展思考开关：返回可见菜单项的选中态；菜单未展开时返回 null
 THINKING_SELECTED_SCRIPT = """() => {
     const items = Array.from(document.querySelectorAll("[role='menuitem'], [role='menuitemradio']"));
-    const pick = items.find(el => (el.innerText || '').includes('扩展思考'));
-    if (!pick) return false;
-    const cls = (pick.className && typeof pick.className === 'string') ? pick.className : '';
-    return cls.includes('selected') || cls.includes('active');
+    const pick = items.find(el => {
+        if (!(el.innerText || '').includes('扩展思考')) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        for (let node = el; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (node.hidden || node.getAttribute('aria-hidden') === 'true'
+                || style.display === 'none' || style.visibility === 'hidden'
+                || style.opacity === '0') return false;
+        }
+        return true;
+    });
+    if (!pick) return null;
+    const checked = pick.getAttribute('aria-checked');
+    if (checked !== null) return checked === 'true';
+    return pick.classList.contains('selected')
+        || Boolean(pick.querySelector('[aria-label="已选中"], [aria-label="Selected"]'));
 }"""
 # 扩展思考开关名（叠加在模型上，独立于模型切换）
 THINKING_ITEM = "扩展思考"
