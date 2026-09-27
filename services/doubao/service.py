@@ -238,7 +238,7 @@ async def _ask_doubao_in_shared_session(
                 return AskResult(
                     ok=False,
                     error=(
-                        f"豆包触发了人机验证（{actions.last_blocker}），自动化无法完成。"
+                        f"豆包页面检测到{actions.last_blocker}，自动化无法完成。"
                         "请手动在浏览器中完成验证后重试。"
                     ),
                 )
@@ -540,7 +540,7 @@ async def generate_doubao_image(
             if not confirm_ok:
                 if actions.last_blocker:
                     return False, [], (
-                        f"豆包触发了人机验证（{actions.last_blocker}），自动化无法完成。"
+                        f"豆包页面检测到{actions.last_blocker}，自动化无法完成。"
                         "请手动在浏览器中完成验证后重试。"
                     ), ""
                 if not auto_confirm and proposal:
@@ -551,7 +551,7 @@ async def generate_doubao_image(
             if not image_urls:
                 if actions.last_blocker:
                     return False, [], (
-                        f"豆包触发了人机验证（{actions.last_blocker}），自动化无法完成。"
+                        f"豆包页面检测到{actions.last_blocker}，自动化无法完成。"
                         "请手动在浏览器中完成验证后重试（必要时降低调用频率）。"
                     ), ""
                 page_text = (await actions.read_text(max_chars=400)) or ""
@@ -673,7 +673,7 @@ async def submit_doubao_video(
             if not confirm_ok:
                 if actions.last_blocker:
                     return False, (
-                        f"豆包触发了人机验证（{actions.last_blocker}），自动化无法完成。"
+                        f"豆包页面检测到{actions.last_blocker}，自动化无法完成。"
                         "请手动在浏览器中完成验证后重试。"
                     ), ""
                 if not auto_confirm and proposal:

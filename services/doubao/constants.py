@@ -306,27 +306,34 @@ SKILL_ACTIVE_SCRIPT = """(placeholder) => {
     return false;
 }"""
 
-# 风控拦截检测脚本（人机验证）：豆包在生图/生视频等高消耗链路上会弹出
-# 图片选择验证，自动化无法完成，必须人工介入；提前识别可避免长时间空等超时。
-# 验证层由字节验证中心以 iframe 加载（rmc.bytedance.com/verifycenter/captcha），
-# 其文案在主文档 innerText 中取不到，故以可见的验证 iframe 为主要判据，
-# 主文档文案作为站点改用同文档渲染时的兜底。
-# 注意：iframe 判定必须同时校验真实可见性 —— getBoundingClientRect 对
-# visibility:hidden / opacity:0 的元素仍返回真实尺寸（只有 display:none 为 0），
-# 而豆包会预加载隐藏的 iframe（如 drive-iframe 实测 1440x900 + visibility:hidden），
-# 只比尺寸会把隐藏预加载误判成"弹了验证"。
+# 图片验证窗口由字节验证中心的 iframe 加载。只识别路径明确匹配、
+# 位于视口内且可点击的验证窗口；对话正文中的验证文案不能作为判据。
 CAPTCHA_SCRIPT = """() => {
     for (const f of document.querySelectorAll('iframe')) {
-        const src = f.getAttribute('src') || '';
-        if (!/verifycenter\\/captcha|rmc\\.bytedance\\.com/.test(src)) continue;
-        const cs = getComputedStyle(f);
-        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+        let url;
+        try { url = new URL(f.getAttribute('src') || '', location.href); }
+        catch { continue; }
+        if (url.hostname !== 'rmc.bytedance.com'
+                || (url.pathname !== '/verifycenter/captcha'
+                    && !url.pathname.startsWith('/verifycenter/captcha/'))) continue;
         const r = f.getBoundingClientRect();
-        if (r.width > 50 && r.height > 50) return '图片选择验证';
+        if (r.width <= 50 || r.height <= 50) continue;
+        const left = Math.max(0, r.left), top = Math.max(0, r.top);
+        const right = Math.min(innerWidth, r.right), bottom = Math.min(innerHeight, r.bottom);
+        if (right <= left || bottom <= top) continue;
+        let hidden = false;
+        for (let el = f; el; el = el.parentElement) {
+            const style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden'
+                    || Number(style.opacity) < 0.05) {
+                hidden = true;
+                break;
+            }
+        }
+        if (hidden) continue;
+        if (document.elementFromPoint((left + right) / 2, (top + bottom) / 2) !== f) continue;
+        return '可见图片验证窗口';
     }
-    const body = document.body ? (document.body.innerText || '') : '';
-    if (body.includes('请选择所有符合上文描述的图片')) return '图片选择验证';
-    if (body.includes('拖拽到这里') && body.includes('验证')) return '人机验证';
     return '';
 }"""
 

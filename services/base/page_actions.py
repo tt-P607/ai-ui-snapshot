@@ -148,6 +148,7 @@ class PageActions:
         Returns:
             str: 拦截提示文本；无拦截或站点未配置检测脚本时为空字符串。
         """
+        self.last_blocker = ""
         if not self.blocker_script:
             return ""
         try:
@@ -155,6 +156,8 @@ class PageActions:
         except Exception:  # noqa: BLE001 - 页面未就绪
             return ""
         self.last_blocker = hint
+        if hint:
+            logger.warning(f"页面拦截检测命中: {hint}")
         return hint
 
     # ------------------------------------------------------------------
