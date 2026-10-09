@@ -4,6 +4,26 @@
 
 完整说明在上级的 [README.md](../README.md)，这里只告诉你现在该跑哪个。
 
+## 双击打开手工窗口
+
+Windows 下先停止 Bot，再双击对应 BAT：
+
+- [open_deepseek.bat](open_deepseek.bat)：DeepSeek。
+- [open_gemini.bat](open_gemini.bat)：Gemini，沿用插件代理。
+- [open_doubao.bat](open_doubao.bat)：豆包。
+
+入口按自身位置找到项目，读取现有插件配置和原站点登录资料，不包含机器专用路径。需要已安装 Chrome，并确保 `uv` 在 PATH 中。可以手工登录、提问或处理网站风控；关闭后不会自动启动无头浏览器或校验登录态。操作完成后关闭该站点所有窗口，再启动 Bot。
+
+也可以从项目根用 Python 入口，仅添加 `--open-only`：
+
+```bash
+uv run python plugins/ai_ui_snapshot/scripts/login_deepseek.py --open-only
+uv run python plugins/ai_ui_snapshot/scripts/login_gemini.py --open-only
+uv run python plugins/ai_ui_snapshot/scripts/login_doubao.py --open-only
+```
+
+从其他目录执行时，用 `uv run --project <项目根目录> python <登录脚本路径> --open-only`。非 Windows 系统需要配置本机 `screenshot.browser_path`，并自行确保该站点浏览器和 Bot 已关闭。手工通过验证不保证后续无头调用不会再次被风控。
+
 ## 登录或换账号
 
 ```bash
@@ -43,5 +63,6 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py    # 登�
 ## 注意
 
 - 登录态是同一个 `user_data_dir`，两个 Chrome 不能同时用（会崩，exitCode=21）。写了"要先关 bot"的脚本，跑之前记得先停 bot
+- BAT 入口在 Windows 下检查资料目录占用；检测到 Bot 或其他该站点窗口时拒绝启动，不强制关闭进程
 - 联网的脚本会真访问站点。不提问的那几个只做定位和截图；`verify_recognize.py` 会真提问一次
 - `login_common.py` 是三个登录脚本共用的东西，不是入口

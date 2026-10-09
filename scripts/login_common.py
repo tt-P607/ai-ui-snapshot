@@ -1,4 +1,4 @@
-"""登录脚本共用基础设施：普通浏览器登录 + 登录态校验。
+"""登录脚本共用基础设施：普通浏览器登录、手工窗口与登录态校验。
 
 登录流程刻意**不经过任何自动化驱动**：以子进程启动本机 Chrome，只传
 ``--user-data-dir``（与可选 ``--proxy-server``），没有任何会被 Chromium 判为
@@ -8,6 +8,7 @@
 
 用户在普通 Chrome 里手动完成登录后关闭窗口，脚本再用插件运行时同一套会话
 （``BrowserSessionManager``）做一次无头校验：确认站点就绪并保存账号资产。
+传入 ``--open-only`` 时只打开普通 Chrome，不等待关闭，也不做无头校验。
 
 配置读同一份：``config/plugins/ai_ui_snapshot/config.toml``（经插件配置类加载），
 登录态目录和浏览器路径跟随插件配置；Gemini 使用配置代理，其他站点直连。
@@ -15,6 +16,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import pathlib
 import subprocess
@@ -90,8 +92,11 @@ def browser_pids(profile_dir: pathlib.Path) -> list[int]:
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
         "$ErrorActionPreference='SilentlyContinue'; "
         f"$p='{quoted}'; "
+        "$p=$p.Replace('/', '\\'); "
         "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-        "Where-Object { $_.CommandLine -like \"*$p*\" } | "
+        "Where-Object { $_.CommandLine -and "
+        "$_.CommandLine.Replace('/', '\\').IndexOf($p, "
+        "[StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
         "ForEach-Object { $_.ProcessId }"
     )
     proc = subprocess.run(
@@ -190,7 +195,7 @@ async def run_login_flow(
     on_ready: Callable[[pw.Page, pathlib.Path], Awaitable[None]] | None = None,
     describe: Callable[[pw.Page], Awaitable[str]] | None = None,
 ) -> int:
-    """执行一次交互式登录（普通 Chrome，无自动化驱动）并校验。
+    """打开普通 Chrome 登录并校验，或通过 --open-only 仅打开手工窗口。
 
     步骤：启动本机 Chrome 打开站点 → 用户手动登录 → 关闭浏览器 →
     无头会话校验登录态并保存账号资产。
@@ -205,8 +210,18 @@ async def run_login_flow(
     Returns:
         int: 进程退出码（0 成功，1 失败/超时）。
     """
+    parser = argparse.ArgumentParser(description=f"打开 {site} 的 Bot 账号浏览器")
+    parser.add_argument(
+        "--open-only",
+        action="store_true",
+        help="仅打开有头窗口供手工操作，关闭后不进行无头校验",
+    )
+    arguments = parser.parse_args()
     config = load_plugin_config()
     profile = site_profile_dir(config, site)
+    if arguments.open_only and sys.platform == "win32" and browser_pids(profile):
+        print("  ! 登录资料目录正在使用，请先停止 Bot 并关闭该站点的浏览器窗口。")
+        return 1
     profile.mkdir(parents=True, exist_ok=True)
     browser = resolve_browser_path(config.screenshot.browser_path)
     proxy = (config.web.proxy_url or "").strip() if site == "gemini" else ""
@@ -223,6 +238,15 @@ async def run_login_flow(
     if proxy:
         cmd.append(f"--proxy-server={proxy}")
     cmd.append(url)
+    if arguments.open_only:
+        try:
+            await asyncio.to_thread(subprocess.Popen, cmd)
+        except OSError:
+            print("  ! 无法启动 Chrome，请检查 screenshot.browser_path 和浏览器安装。")
+            return 1
+        print("  已打开手工浏览器窗口；操作完成后关闭窗口，再启动 Bot。")
+        print("  此模式不会自动提问，也不会在关闭后进行无头校验。")
+        return 0
     print("  已打开普通 Chrome（无自动化驱动、无特殊启动参数）。")
     print("  请在浏览器里完成登录（换账号：先在里面退出旧账号，再登新账号）。")
     print("  登录完成后关闭该浏览器窗口，脚本会自动校验登录态并保存。")

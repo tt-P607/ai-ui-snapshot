@@ -142,6 +142,30 @@ uv run python plugins/ai_ui_snapshot/scripts/login_doubao.py
 
 脚本会弹出浏览器窗口，你在里面登录（想换账号就先在里面退出旧账号再登新的）。登录完成后**直接把浏览器窗口关掉**，脚本检测到窗口关闭后会自动用无头模式验证登录态并保存头像。
 
+### 手工打开窗口或处理风控
+
+Windows 下先停止 Bot，然后双击插件 `scripts/` 目录中的对应入口：
+
+| 入口 | 网站 |
+|---|---|
+| [open_deepseek.bat](scripts/open_deepseek.bat) | DeepSeek |
+| [open_gemini.bat](scripts/open_gemini.bat) | Gemini |
+| [open_doubao.bat](scripts/open_doubao.bat) | 豆包 |
+
+三个入口读取插件现有配置，沿用 `screenshot.browser_path`、`web.web_profile_dir` 和站点账号；只有 Gemini 使用 `web.proxy_url`。不需要修改 BAT 中的路径，移动整个项目或路径包含空格也可以使用。需要已安装 Chrome，且 `uv` 可在命令行中运行。
+
+浏览器是普通有头 Chrome，不经自动化驱动。你可以手工登录、提问或完成网站的人机验证；脚本不会自动提问，不等待窗口关闭，也不会在关闭后启动无头浏览器校验。Windows 下检测到该站点资料目录已被占用时会拒绝启动。操作完成后关闭该站点所有窗口，再启动 Bot；手工验证通过不保证后续无头请求一定不会再次被风控。
+
+命令行或其他系统使用同一套 Python 入口：
+
+```bash
+uv run python plugins/ai_ui_snapshot/scripts/login_deepseek.py --open-only
+uv run python plugins/ai_ui_snapshot/scripts/login_gemini.py --open-only
+uv run python plugins/ai_ui_snapshot/scripts/login_doubao.py --open-only
+```
+
+以上命令从项目根运行。从其他目录调用时，用 `uv run --project <项目根目录> python <登录脚本路径> --open-only`；其他系统需要在 `screenshot.browser_path` 中配置本机 Chrome 可执行路径。同一站点的资料目录不能同时交给 Bot 和手工窗口使用。
+
 ### 4. 确认能用
 
 登录完成后先别急着开 Bot，跑两条脚本确认环境：
@@ -222,15 +246,18 @@ uv run python plugins/ai_ui_snapshot/scripts/verify_login_readiness.py
 
 ## 脚本
 
-都在插件 `scripts/` 下面。日常用的三个：
+都在插件 `scripts/` 下面。日常入口：
 
 | 脚本 | 干什么 |
 |---|---|
 | `login_deepseek.py` | DeepSeek 登录或换账号 |
 | `login_gemini.py` | Gemini 登录或换账号（走代理） |
 | `login_doubao.py` | 豆包登录或换账号 |
+| `open_deepseek.bat` | Windows 双击打开 DeepSeek 手工窗口 |
+| `open_gemini.bat` | Windows 双击打开 Gemini 手工窗口（走配置代理） |
+| `open_doubao.bat` | Windows 双击打开豆包手工窗口 |
 
-`login_common.py` 是这三个共用的东西，不是入口，不用管。
+三个 Python 登录入口传入 `--open-only` 时同样只打开手工窗口；不传时保留登录后无头校验流程。`login_common.py` 是它们共用的实现，不是入口。
 
 验证脚本，改完代码或者换环境之后跑：
 
