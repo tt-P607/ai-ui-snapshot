@@ -27,16 +27,12 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from src.app.plugin_system.api import send_api
-
 from src.app.plugin_system.api.log_api import get_logger
-
-from src.app.plugin_system.base import BaseTool
+from src.app.plugin_system.base import BaseTool, PlatformSendStatus
 
 from ..config import AiUiSnapshotConfig
-
 from ..services.base.browser_session import get_manager
 from ..services.delivery import send_snapshot_pieces
-
 from ..services.service import (
     AskResult,
     ask_doubao,
@@ -45,7 +41,6 @@ from ..services.service import (
     generate_doubao_image,
     submit_doubao_video,
 )
-
 from .base import _ToolBase
 
 logger = get_logger("ai_ui_snapshot.doubao_tool")
@@ -290,8 +285,8 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
 
         if not result.ok:
             return False, result.error or "截图失败"
-        error = await send_snapshot_pieces(result.data_uri, stream_id, "豆包")
-        if error:
+        sent, error = await send_snapshot_pieces(result.data_uri, stream_id, "豆包")
+        if not sent:
             return False, error
 
         res: dict[str, Any] = {
@@ -303,6 +298,8 @@ class DoubaoSnapshotTool(_DoubaoToolBase):
         }
         if result.snapshot_meta:
             res["snapshot_meta"] = result.snapshot_meta
+        if error:
+            res["delivery_warning"] = error
 
         return True, res
 
@@ -571,31 +568,38 @@ class DoubaoGenerateImageTool(_DoubaoToolBase):
         import base64
 
         sent_count = 0
-        send_fail = False
-        for path in paths:
+        send_failures: list[str] = []
+        for index, path in enumerate(paths, 1):
             try:
                 with open(path, "rb") as f:  # noqa: PTH123
                     img_b64 = base64.b64encode(f.read()).decode()
             except OSError as exc:
                 logger.warning(f"读取生成图片失败 {path}: {exc}")
+                send_failures.append(f"第 {index}/{len(paths)} 张图片读取失败：{exc}")
                 continue
-            sent = await send_api.send_image(
+            send_result = await send_api.send_image_result(
                 img_b64, stream_id, processed_plain_text="[豆包生成图片]"
+            )
+            sent, receipt = send_api.format_send_result(
+                send_result, f"第 {index}/{len(paths)} 张图片已发送"
             )
             if sent:
                 sent_count += 1
+                if send_result.status is PlatformSendStatus.SENT and not send_result.success:
+                    send_failures.append(receipt)
             else:
-                send_fail = True
+                send_failures.append(receipt)
         if sent_count == 0:
             res: dict[str, Any] = {
                 "sent": False,
                 "paths": paths,
                 "summary": "图片已生成但全部发送失败，文件在本地。",
+                "send_errors": send_failures,
             }
             if proposal:
                 res["proposal"] = proposal
             return True, res
-        partial = send_fail or sent_count < len(paths)
+        partial = bool(send_failures) or sent_count < len(paths)
         res_data: dict[str, Any] = {
             "sent": True,
             "count": sent_count,
@@ -613,6 +617,8 @@ class DoubaoGenerateImageTool(_DoubaoToolBase):
         }
         if proposal:
             res_data["proposal"] = proposal
+        if send_failures:
+            res_data["send_errors"] = send_failures
         return True, res_data
 
 
@@ -645,20 +651,30 @@ class DoubaoDownloadImagesTool(_DoubaoToolBase):
         import base64
 
         sent_count = 0
-        for path in result.images:
+        send_failures: list[str] = []
+        for index, path in enumerate(result.images, 1):
             try:
                 with open(path, "rb") as image_file:  # noqa: PTH123
                     image_b64 = base64.b64encode(image_file.read()).decode("ascii")
-                if await send_api.send_image(
+                send_result = await send_api.send_image_result(
                     image_b64,
                     stream_id,
                     processed_plain_text="[豆包对话生成图片]",
-                ):
+                )
+                sent, receipt = send_api.format_send_result(
+                    send_result, "豆包对话生成图片已发送"
+                )
+                if sent:
                     sent_count += 1
+                    continue
+                send_failures.append(f"第 {index}/{len(result.images)} 张图片：{receipt}")
+                logger.warning(f"豆包下载图发送未确认: {receipt}")
             except OSError as exc:
                 logger.warning(f"读取豆包对话生成图片失败 {path}: {exc}")
+                send_failures.append(f"第 {index}/{len(result.images)} 张图片读取失败：{exc}")
         if sent_count == 0:
-            return False, "图片已下载，但发送到当前聊天失败"
+            details = "；".join(send_failures) or "没有可发送的本地图片"
+            return False, f"图片已下载，但没有图片确认发送：{details}"
         return True, {
             "sent": True,
             "count": sent_count,
@@ -666,6 +682,7 @@ class DoubaoDownloadImagesTool(_DoubaoToolBase):
             "paths": result.images,
             "conversation": result.conversation,
             "summary": f"已从豆包对话下载并发送 {sent_count}/{len(result.images)} 张生成图片。",
+            "send_errors": send_failures,
         }
 
 
@@ -820,16 +837,22 @@ class DoubaoSendVideoTool(_DoubaoToolBase):
 
         stream_id = self.get_current_stream_id()
 
-        sent = await send_api.send_video(
+        send_result = await send_api.send_video_result(
             path, stream_id, processed_plain_text="[豆包生成视频]"
         )
-
+        sent, receipt = send_api.format_send_result(send_result, "视频已发送")
         if not sent:
-            return False, "视频发送失败"
+            return False, receipt
 
         return True, {
             "sent": True,
             "summary": "视频已发出，请用拟人口吻简单介绍内容即可。",
+            "delivery_warning": (
+                receipt
+                if send_result.status is PlatformSendStatus.SENT
+                and not send_result.success
+                else ""
+            ),
         }
 
 

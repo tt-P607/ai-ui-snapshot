@@ -188,8 +188,8 @@ class DeepseekSnapshotTool(_DeepSeekToolBase):
         )
         if not result.ok:
             return False, result.error or "截图失败"
-        error = await send_snapshot_pieces(result.data_uri, stream_id, "DeepSeek")
-        if error:
+        sent, error = await send_snapshot_pieces(result.data_uri, stream_id, "DeepSeek")
+        if not sent:
             return False, error
         res: dict[str, Any] = {
             "sent": True,
@@ -200,6 +200,8 @@ class DeepseekSnapshotTool(_DeepSeekToolBase):
         }
         if result.snapshot_meta:
             res["snapshot_meta"] = result.snapshot_meta
+        if error:
+            res["delivery_warning"] = error
         return True, res
 
 

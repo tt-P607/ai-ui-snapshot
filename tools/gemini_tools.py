@@ -126,7 +126,7 @@ class AskGeminiAiTool(_ToolBase):
             return False, result.error or "向 Gemini 提问失败"
 
         # Gemini 在对话中直接生成了图片：读取并发送到当前聊天
-        image_sent = await self._send_generated_image(result, stream_id)
+        image_sent, image_error = await self._send_generated_image(result, stream_id)
 
         summary = (
             "这是 Gemini 的回复内容，请自然地向用户转述/消化，无需发送截图或链接。"
@@ -137,6 +137,8 @@ class AskGeminiAiTool(_ToolBase):
                 "Gemini 在回答时直接生成了图片，图片已自动发送到当前聊天，"
                 "回复正文见 reply 字段，请一并自然转述。"
             )
+        elif result.image_path:
+            summary = "Gemini 回复及图片生成已成功，但图片未确认发送；不要重发图片，回复正文见 reply 字段。"
 
         res_data: dict[str, Any] = {
             "model": result.model_name,
@@ -151,11 +153,15 @@ class AskGeminiAiTool(_ToolBase):
                 res_data["images_base64"] = result.images_base64
             elif result.image_descriptions:
                 res_data["image_descriptions"] = result.image_descriptions
+        if result.image_path:
+            res_data["image_sent"] = image_sent
+            if image_error:
+                res_data["image_send_error"] = image_error
 
         return True, res_data
 
     @staticmethod
-    async def _send_generated_image(result: AskResult, stream_id: str) -> bool:
+    async def _send_generated_image(result: AskResult, stream_id: str) -> tuple[bool, str]:
         """将 Gemini 对话中生成的图片读取并发送到当前聊天。
 
         Args:
@@ -163,24 +169,25 @@ class AskGeminiAiTool(_ToolBase):
             stream_id: 聊天流 ID。
 
         Returns:
-            bool: 是否成功发送了图片。
+            tuple[bool, str]: 是否确认发送及发送错误或警告。
         """
         if not result.image_path:
-            return False
+            return False, ""
         try:
             import base64 as _b64
             import pathlib as _pl
 
             raw = _pl.Path(result.image_path).read_bytes()
             image_b64 = _b64.b64encode(raw).decode("ascii")
-            return bool(await send_api.send_image(
+            send_result = await send_api.send_image_result(
                 image_b64,
                 stream_id,
                 processed_plain_text="[Gemini 生成的图片]",
-            ))
+            )
+            return send_api.format_send_result(send_result, "Gemini 生成图片已发送")
         except Exception as exc:  # noqa: BLE001 - 发图失败不阻塞回复
             logger.warning(f"发送 Gemini 生成图片失败: {exc}")
-            return False
+            return False, f"图片读取或发送异常：{exc}；不要自动重试"
 
 
 class GeminiGenerateImageTool(_ToolBase):
@@ -251,18 +258,22 @@ class GeminiGenerateImageTool(_ToolBase):
             image_b64 = _b64.b64encode(raw).decode("ascii")
         except Exception as exc:  # noqa: BLE001 - 读取失败
             return False, f"读取生成的图片失败: {exc}"
-        sent = await send_api.send_image(
+        send_result = await send_api.send_image_result(
             image_b64,
             stream_id,
             processed_plain_text="[Gemini 生成的图片]",
         )
-        if not sent:
-            return False, "图片已生成但发送失败"
+        sent, send_message = send_api.format_send_result(send_result, "Gemini 生成图片已发送")
 
         return True, {
-            "sent": True,
+            "sent": sent,
+            "send_result": send_message,
             "path": path,
-            "summary": "已用 Gemini 生成图片并发出，请用拟人口吻简单引述即可。",
+            "summary": (
+                "已用 Gemini 生成图片并发出，请用拟人口吻简单引述即可。"
+                if sent
+                else f"Gemini 图片已生成，但{send_message}；不要重发。"
+            ),
         }
 
 
@@ -292,14 +303,15 @@ class GeminiDownloadImageTool(_ToolBase):
         )
         if not result.ok or not result.image_path:
             return False, result.error or "Gemini 对话图片下载失败"
-        sent = await AskGeminiAiTool._send_generated_image(result, stream_id)
+        sent, receipt = await AskGeminiAiTool._send_generated_image(result, stream_id)
         if not sent:
-            return False, "图片已下载，但发送到当前聊天失败"
+            return False, f"图片已下载，但{receipt}"
         return True, {
             "sent": True,
             "path": result.image_path,
             "conversation": result.conversation,
             "summary": "已从 Gemini 对话下载最近一张生成图片并发送。",
+            "delivery_warning": receipt,
         }
 
 
@@ -347,8 +359,8 @@ class GeminiSnapshotTool(_ToolBase):
         )
         if not result.ok:
             return False, result.error or "截图失败"
-        error = await send_snapshot_pieces(result.data_uri, stream_id, "Gemini")
-        if error:
+        sent, error = await send_snapshot_pieces(result.data_uri, stream_id, "Gemini")
+        if not sent:
             return False, error
         res: dict[str, Any] = {
             "sent": True,
@@ -359,6 +371,8 @@ class GeminiSnapshotTool(_ToolBase):
         }
         if result.snapshot_meta:
             res["snapshot_meta"] = result.snapshot_meta
+        if error:
+            res["delivery_warning"] = error
         return True, res
 
 
